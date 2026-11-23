@@ -6,5 +6,5 @@ After=network-online.target
 [Service]
 Type=oneshot
 RemainAfterExit=yes
-ExecStart=/usr/bin/wg-quick up /etc/vk-turn-manager/wg-vk.conf
-ExecStop=/usr/bin/wg-quick down /etc/vk-turn-manager/wg-vk.conf
+ExecStart=/bin/bash /usr/bin/wg-quick up /etc/vk-turn-manager/wg-vk.conf
+ExecStop=/bin/bash /usr/bin/wg-quick down /etc/vk-turn-manager/wg-vk.conf
