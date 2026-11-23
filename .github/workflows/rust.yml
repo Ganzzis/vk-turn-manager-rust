@@ -12,7 +12,7 @@ jobs:
   build:
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - name: Check formatting
         run: cargo fmt --all -- --check
       - name: Run tests
@@ -21,7 +21,7 @@ jobs:
         run: cargo build --locked --release
       - name: Install and remove services on Ubuntu 24.04
         run: bash tests/ubuntu-install.sh target/release/vk-turn-manager
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         with:
           name: vk-turn-manager-linux-amd64
           path: target/release/vk-turn-manager

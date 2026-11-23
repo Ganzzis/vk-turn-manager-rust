@@ -67,23 +67,29 @@ fn validate_config(config: &str) -> Result<()> {
     for line in config.lines() {
         let line = line.split('#').next().unwrap_or("").trim();
         if line.starts_with('[') {
+            if !line.eq_ignore_ascii_case("[Interface]") && !line.eq_ignore_ascii_case("[Peer]") {
+                return Err("wg-vk.conf: expected an [Interface] or [Peer] section".into());
+            }
             section = line;
             if line.eq_ignore_ascii_case("[Interface]") {
                 interfaces += 1;
             }
         } else if let Some((key, value)) = line.split_once('=') {
+            let key = key.trim().to_ascii_lowercase();
+            if matches!(
+                key.as_str(),
+                "dns" | "preup" | "postup" | "predown" | "postdown" | "saveconfig"
+            ) {
+                return Err(format!("wg-vk.conf: {key} is unsupported").into());
+            }
             if !section.eq_ignore_ascii_case("[Interface]") {
                 continue;
             }
-            let key = key.trim().to_ascii_lowercase();
             match key.as_str() {
                 "listenport" if !port && value.trim() == "51820" => port = true,
                 "table" if !table && value.trim() == "off" => table = true,
                 "listenport" | "table" => {
                     return Err("Set exactly one ListenPort = 51820 and Table = off".into());
-                }
-                "dns" | "preup" | "postup" | "predown" | "postdown" | "saveconfig" => {
-                    return Err(format!("wg-vk.conf: {key} is unsupported in [Interface]").into());
                 }
                 _ => {}
             }
@@ -441,6 +447,7 @@ mod tests {
             "[Peer]\nListenPort = 51820\nTable = off\n",
             &format!("{CONFIG}ListenPort = 51820\n"),
             &format!("{CONFIG}[Interface]\n"),
+            &format!("{CONFIG}[Interface] = invalid\n"),
         ] {
             assert!(validate_config(config).is_err(), "{config}");
         }
