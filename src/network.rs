@@ -64,7 +64,9 @@ pub fn plan() -> Result<()> {
             let error = String::from_utf8_lossy(&result.stderr);
             if error.contains("No such file or directory") {
                 println!("Existing ip vkturn table: absent");
-                println!("Action: a new, separately owned table may be provisioned after validation");
+                println!(
+                    "Action: a new, separately owned table may be provisioned after validation"
+                );
             } else {
                 return Err(format!("Cannot safely inspect nftables: {}", error.trim()).into());
             }
@@ -89,7 +91,10 @@ mod tests {
             route_interface("1.1.1.1 via 10.0.0.1 dev ens3 src 192.0.2.1"),
             Some("ens3")
         );
-        assert_eq!(route_interface("1.1.1.1 dev eth0 src 192.0.2.1"), Some("eth0"));
+        assert_eq!(
+            route_interface("1.1.1.1 dev eth0 src 192.0.2.1"),
+            Some("eth0")
+        );
         assert_eq!(route_interface("unreachable 1.1.1.1"), None);
     }
 }
