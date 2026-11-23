@@ -2,7 +2,8 @@
 name = "vk-turn-manager"
 version = "0.1.0"
 edition = "2021"
+rust-version = "1.89"
 license = "MIT"
-description = "Minimal Ubuntu 24.04 service installer for WireGuard and a supplied SRTP executable"
+description = "Ubuntu 24.04 installer for VK TURN Proxy SRTP and WireGuard"
 
 [dependencies]
