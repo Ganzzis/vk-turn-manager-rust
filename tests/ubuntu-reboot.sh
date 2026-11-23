@@ -90,7 +90,8 @@ echo "Ubuntu VM rebooted, new boot ID: $after"
 remote 'bash -se' <<'GUEST'
 # SSH can be reachable before the two services finish starting at boot.
 for ((attempt=0; attempt<60; attempt++)); do
-  if systemctl is-active --quiet vk-turn-wireguard.service vk-turn-srtp.service &&
+  if systemctl is-active --quiet vk-turn-wireguard.service &&
+    systemctl is-active --quiet vk-turn-srtp.service &&
     [[ $(sudo wg show wg-vk listen-port 2>/dev/null) == 51820 ]] &&
     [[ -n $(sudo ss -Hlun 'sport = :56004') ]]; then
     sudo ./vk-turn-manager status

@@ -52,7 +52,7 @@ expect_failure() {
     exit 1
   fi
   cat "$scratch/failure.log"
-  grep -Fq "$expected" "$scratch/failure.log"
+  grep -Eq "$expected" "$scratch/failure.log"
   if grep -Fq 'Cleanup failed:' "$scratch/failure.log"; then
     exit 1
   fi
@@ -81,11 +81,14 @@ sudo apt-get update
 sudo apt-get install -y --no-install-recommends wireguard-tools
 sudo modprobe wireguard
 
-{
-  printf '[Interface]\nPrivateKey = '
-  wg genkey
-  printf 'Address = 10.240.42.1/24\nListenPort = 51820\nTable = off\n'
-} > "$config"
+(
+  umask 077
+  {
+    printf '[Interface]\nPrivateKey = '
+    wg genkey
+    printf 'Address = 10.240.42.1/24\nListenPort = 51820\nTable = off\n'
+  } > "$config"
+)
 sha256sum "$config" > "$scratch/source.sha256"
 
 printf '%s\n' 'unrelated WireGuard config' | write_fixture "$foreign_config"
@@ -127,7 +130,7 @@ exec env HTTPS_PROXY=http://127.0.0.1:1 https_proxy=http://127.0.0.1:1 \
 CURL
 chmod +x "$scratch/bin/curl"
 installation_attempted=true
-expect_failure 'exit status: 7' sudo env PATH="$scratch/bin:$PATH" "$manager" install "$config"
+expect_failure 'exit status: 7\)' sudo env PATH="$scratch/bin:$PATH" "$manager" install "$config"
 grep -F 'curl: (7)' "$scratch/failure.log"
 assert_removed
 assert_foreign_untouched
@@ -139,8 +142,9 @@ write_fixture "$dropin/10-ci-fail.conf" <<'UNIT'
 [Service]
 ExecStartPre=/usr/bin/false
 UNIT
-expect_failure "systemctl enable --now $srtp_unit failed" sudo "$manager" install "$config"
+expect_failure 'systemctl enable --now .* failed|SRTP did not bind UDP 56004' sudo "$manager" install "$config"
 sudo journalctl -b -u "$srtp_unit" --no-pager | grep -F 'Failed to start'
+sudo journalctl -b -u "$wg_unit" --no-pager | grep -F 'ip link add wg-vk type wireguard'
 assert_removed
 assert_foreign_untouched
 printf '[Service]\nExecStartPre=/usr/bin/false\n' | sudo cmp - "$dropin/10-ci-fail.conf"
