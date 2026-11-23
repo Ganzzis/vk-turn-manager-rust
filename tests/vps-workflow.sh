@@ -27,8 +27,9 @@ test -n "$VPS_HOST" && test -n "$VPS_USER" && test -n "$VPS_SSH_KEY" && test -n 
 umask 077
 printf '%s\n' "$VPS_SSH_KEY" > "$scratch/key"
 printf '%s\n' "$VPS_KNOWN_HOSTS" > "$scratch/known_hosts"
-created=$(remote 'mktemp -d /tmp/vk-turn-ci.XXXXXXXX')
-[[ $created =~ ^/tmp/vk-turn-ci\.[[:alnum:]]{8}$ ]]
+# Keep the payload across reboot even if /tmp is mounted as tmpfs.
+created=$(remote 'mktemp -d "$HOME/.vk-turn-ci.XXXXXXXX"')
+[[ $created =~ ^/[[:alnum:]_./-]+/\.vk-turn-ci\.[[:alnum:]]{8}$ ]]
 remote_dir=$created
 scp "${opts[@]}" target/release/vk-turn-manager "$target:$remote_dir/vk-turn-manager"
 remote "chmod 700 '$remote_dir/vk-turn-manager'"

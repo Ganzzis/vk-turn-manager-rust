@@ -123,6 +123,12 @@ fn report_firewall(ruleset: &str) {
             "Other nftables forward hooks detected; their policies can still drop VPN traffic."
         );
     }
+    if fs::read_to_string("/proc/net/ip_tables_names").is_ok_and(|tables| !tables.trim().is_empty())
+    {
+        println!(
+            "Legacy IPv4 iptables tables detected; inspect their forwarding and NAT policies."
+        );
+    }
     println!("Verify forwarding end to end. Other firewalls, routing policy and upstream filters may still block traffic.");
 }
 
