@@ -1,3 +1,5 @@
+mod network;
+
 use std::env;
 use std::fs::{self, DirBuilder, File, OpenOptions};
 use std::io::{self, Write};
@@ -477,6 +479,7 @@ fn main() -> ExitCode {
         }
         [command] if command == "uninstall" => uninstall(),
         [command, subcommand] if command == "network" && subcommand == "status" => network_status(),
+        [command, subcommand] if command == "network" && subcommand == "plan" => network::plan(),
         [command] if command == "--help" || command == "-h" => {
             usage();
             return ExitCode::SUCCESS;
@@ -496,7 +499,7 @@ fn main() -> ExitCode {
 }
 
 fn usage() {
-    eprintln!("Usage:\n  vk-turn-manager install <wg-config-file>\n  vk-turn-manager status\n  vk-turn-manager uninstall\n  vk-turn-manager network status");
+    eprintln!("Usage:\n  vk-turn-manager install <wg-config-file>\n  vk-turn-manager status\n  vk-turn-manager uninstall\n  vk-turn-manager network status\n  vk-turn-manager network plan");
 }
 
 #[cfg(test)]
