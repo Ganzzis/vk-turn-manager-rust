@@ -455,7 +455,7 @@ fn main() -> ExitCode {
 }
 
 fn usage() {
-    eprintln!("Usage:\n  vk-turn-manager install <wg-config-file>\n  vk-turn-manager status\n  vk-turn-manager uninstall");
+    eprintln!("Usage:\n  vk-turn-manager install <wg-config-file>\n  vk-turn-manager status\n  vk-turn-manager uninstall\n  vk-turn-manager network status");
 }
 
 #[cfg(test)]
