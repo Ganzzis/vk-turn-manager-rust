@@ -1,3 +1,5 @@
+mod network;
+
 use std::env;
 use std::fs::{self, DirBuilder, File, OpenOptions};
 use std::io::{self, Write};
@@ -391,6 +393,83 @@ fn uninstall() -> Result<()> {
     Ok(())
 }
 
+fn network_status() -> Result<()> {
+    let route = output("ip", &["-4", "route", "get", "1.1.1.1"])?;
+    if route.status.success() {
+        println!(
+            "Outbound route: {}",
+            String::from_utf8_lossy(&route.stdout).trim()
+        );
+    } else {
+        println!("Outbound route: unavailable");
+    }
+
+    let forwarding = fs::read_to_string("/proc/sys/net/ipv4/ip_forward")?;
+    println!(
+        "IPv4 forwarding: {}",
+        if forwarding.trim() == "1" {
+            "enabled"
+        } else {
+            "disabled"
+        }
+    );
+
+    let wg = output("wg", &["show", "wg-vk", "listen-port"])?;
+    println!(
+        "WireGuard wg-vk: {}",
+        if wg.status.success() {
+            format!("UDP {}", String::from_utf8_lossy(&wg.stdout).trim())
+        } else {
+            "not active".to_string()
+        }
+    );
+
+    let srtp = output("systemctl", &["is-active", SRTP])?;
+    println!(
+        "SRTP service: {}",
+        if srtp.status.success() {
+            "active"
+        } else {
+            "inactive"
+        }
+    );
+
+    match Command::new("nft")
+        .args(["list", "table", "ip", "vkturn"])
+        .output()
+    {
+        Ok(result) if result.status.success() => {
+            let rules = String::from_utf8_lossy(&result.stdout);
+            println!("VK TURN nftables table: present");
+            println!(
+                "Masquerade rule: {}",
+                if rules.contains("masquerade") {
+                    "present"
+                } else {
+                    "missing"
+                }
+            );
+            println!(
+                "Forward chain: {}",
+                if rules.contains("hook forward") {
+                    "present"
+                } else {
+                    "missing"
+                }
+            );
+        }
+        Ok(_) => println!("VK TURN nftables table: absent or inaccessible"),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            println!("nftables: command not installed")
+        }
+        Err(error) => return Err(format!("Could not inspect nftables: {error}").into()),
+    }
+    println!(
+        "Note: this is a read-only diagnostic; other firewall chains may still block traffic."
+    );
+    Ok(())
+}
+
 fn main() -> ExitCode {
     let args: Vec<_> = env::args_os().skip(1).collect();
     let result = match args.as_slice() {
@@ -399,6 +478,8 @@ fn main() -> ExitCode {
             systemctl(&["--no-pager", "--full", "status", WG, SRTP])
         }
         [command] if command == "uninstall" => uninstall(),
+        [command, subcommand] if command == "network" && subcommand == "status" => network_status(),
+        [command, subcommand] if command == "network" && subcommand == "plan" => network::plan(),
         [command] if command == "--help" || command == "-h" => {
             usage();
             return ExitCode::SUCCESS;
@@ -418,7 +499,7 @@ fn main() -> ExitCode {
 }
 
 fn usage() {
-    eprintln!("Usage:\n  vk-turn-manager install <wg-config-file>\n  vk-turn-manager status\n  vk-turn-manager uninstall");
+    eprintln!("Usage:\n  vk-turn-manager install <wg-config-file>\n  vk-turn-manager status\n  vk-turn-manager uninstall\n  vk-turn-manager network status\n  vk-turn-manager network plan");
 }
 
 #[cfg(test)]
