@@ -11,6 +11,7 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-24.04
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v6
       - name: Check formatting
@@ -21,6 +22,12 @@ jobs:
         run: cargo build --locked --release
       - name: Install and remove services on Ubuntu 24.04
         run: bash tests/ubuntu-install.sh target/release/vk-turn-manager
+      - name: Install VM tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends qemu-system-x86 qemu-utils cloud-image-utils
+      - name: Verify service autostart after rebooting an Ubuntu 24.04 VM
+        run: bash tests/ubuntu-reboot.sh target/release/vk-turn-manager
       - uses: actions/upload-artifact@v6
         with:
           name: vk-turn-manager-linux-amd64
