@@ -5,6 +5,9 @@ on:
     branches: [main]
   pull_request:
 
+permissions:
+  contents: read
+
 jobs:
   build:
     runs-on: ubuntu-24.04
@@ -12,7 +15,15 @@ jobs:
       - uses: actions/checkout@v4
       - name: Check formatting
         run: cargo fmt --all -- --check
-      - name: Compile
-        run: cargo build --release
       - name: Run tests
-        run: cargo test
+        run: cargo test --locked
+      - name: Build Linux x86-64 binary
+        run: cargo build --locked --release
+      - name: Install and remove services on Ubuntu 24.04
+        run: bash tests/ubuntu-install.sh target/release/vk-turn-manager
+      - uses: actions/upload-artifact@v4
+        with:
+          name: vk-turn-manager-linux-amd64
+          path: target/release/vk-turn-manager
+          if-no-files-found: error
+          retention-days: 7

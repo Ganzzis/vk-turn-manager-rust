@@ -1,0 +1,15 @@
+[Unit]
+Description=VK TURN Proxy DTLS-SRTP server
+BindsTo=vk-turn-wireguard.service
+After=vk-turn-wireguard.service
+
+[Service]
+Type=exec
+DynamicUser=yes
+NoNewPrivileges=yes
+ExecStart=/etc/vk-turn-manager/server -srtp -listen 0.0.0.0:56004 -connect 127.0.0.1:51820
+Restart=on-failure
+RestartSec=3s
+
+[Install]
+WantedBy=multi-user.target

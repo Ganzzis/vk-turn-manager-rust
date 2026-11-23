@@ -1,0 +1,10 @@
+[Unit]
+Description=VK TURN Manager WireGuard interface
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/bin/wg-quick up /etc/vk-turn-manager/wg-vk.conf
+ExecStop=/usr/bin/wg-quick down /etc/vk-turn-manager/wg-vk.conf
