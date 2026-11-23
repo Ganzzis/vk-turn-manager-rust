@@ -106,7 +106,7 @@ add chain ip {TABLE} forward {{ type filter hook forward priority filter; policy
 add rule ip {TABLE} forward iifname "wg-vk" oifname "{interface}" ip saddr {subnet} ct state new,established,related accept
 add rule ip {TABLE} forward iifname "{interface}" oifname "wg-vk" ip daddr {subnet} ct state established,related accept
 add chain ip {TABLE} postrouting {{ type nat hook postrouting priority srcnat; policy accept; }}
-add rule ip {TABLE} postrouting iifname "wg-vk" oifname "{interface}" ip saddr {subnet} masquerade
+add rule ip {TABLE} postrouting iifname "wg-vk" oifname "{interface}" ip saddr {subnet} counter masquerade
 "#
     )
 }
@@ -161,21 +161,44 @@ fn table() -> Result<Option<String>> {
     Ok(None)
 }
 
-fn active() -> bool {
+fn service_active(unit: &str) -> bool {
     Command::new("systemctl")
-        .args(["is-active", "--quiet", UNIT])
+        .args(["is-active", "--quiet", unit])
         .status()
         .is_ok_and(|s| s.success())
 }
 
 pub fn status() -> Result<()> {
+    match read_command("ip", &["-4", "route", "get", "1.1.1.1"]) {
+        Ok(route) => println!(
+            "Outbound interface: {}",
+            route_interface(&route).unwrap_or("ambiguous")
+        ),
+        Err(_) => println!("Outbound interface: unavailable"),
+    }
+    match read_command("wg", &["show", "wg-vk", "listen-port"]) {
+        Ok(port) => println!("WireGuard wg-vk: UDP {}", port.trim()),
+        Err(_) => println!("WireGuard wg-vk: inactive or unavailable"),
+    }
+    println!(
+        "SRTP service: {}",
+        if service_active(crate::SRTP) {
+            "active"
+        } else {
+            "inactive"
+        }
+    );
     println!(
         "IPv4 forwarding: {}",
         if forwarding()? { "enabled" } else { "disabled" }
     );
     println!(
         "Managed NAT service: {}",
-        if active() { "active" } else { "inactive" }
+        if service_active(UNIT) {
+            "active"
+        } else {
+            "inactive"
+        }
     );
     let ruleset = read_command("nft", &["-s", "list", "ruleset"])?;
     if let Some(current) = table()? {
@@ -252,7 +275,7 @@ pub fn enable() -> Result<()> {
         if !owns_unit(UNIT, UNIT_TEXT)?
             || fs::read_to_string(RULES)? != desired
             || !forwarding()?
-            || !active()
+            || !service_active(UNIT)
             || !Command::new("systemctl")
                 .args(["is-enabled", "--quiet", UNIT])
                 .status()?
@@ -298,7 +321,7 @@ pub fn enable() -> Result<()> {
         systemctl(&["daemon-reload"])?;
         starting = true;
         systemctl(&["enable", "--now", UNIT])?;
-        if !active() || !forwarding()? {
+        if !service_active(UNIT) || !forwarding()? {
             return Err(format!(
                 "{UNIT} failed to activate NAT and forwarding; inspect its journal"
             )
@@ -420,8 +443,9 @@ mod tests {
     fn rules_are_scoped_and_use_an_exclusive_table() {
         let proposed = rules("enp1s0", "172.30.4.0/23");
         assert!(proposed.starts_with("create table ip vk_turn_manager "));
-        assert!(proposed
-            .contains(r#"iifname "wg-vk" oifname "enp1s0" ip saddr 172.30.4.0/23 masquerade"#));
+        assert!(proposed.contains(
+            r#"iifname "wg-vk" oifname "enp1s0" ip saddr 172.30.4.0/23 counter masquerade"#
+        ));
         assert!(!proposed.contains("flush"));
     }
 
