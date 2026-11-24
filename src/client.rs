@@ -619,7 +619,6 @@ pub fn command(args: &[std::ffi::OsString]) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 
     #[test]
     fn allocation_skips_disk_runtime_and_server_ranges_and_exhausts() {
@@ -701,25 +700,15 @@ mod tests {
         let peer = synthetic();
         let link = ios::link(
             &peer,
-            "fixture-private",
-            "fixture-public",
+            "ERERERERERERERERERERERERERERERERERERERERERE=",
+            "HR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0=",
             "srtp.example:56004",
             "https://vk.ru/call/join/synthetic",
         )
         .unwrap();
-        let encoded = link
-            .trim()
-            .strip_prefix("vkturnproxy://import?data=")
-            .unwrap();
-        let decoded: Value =
-            serde_json::from_slice(&URL_SAFE_NO_PAD.decode(encoded).unwrap()).unwrap();
         assert_eq!(
-            decoded,
-            json!({"version":1,"type":"connection","settings":{
-                "serverName":"demo","privateKey":"fixture-private","peerPublicKey":"fixture-public",
-                "peerAddress":"srtp.example:56004","tunnelAddress":"172.21.7.2/32",
-                "allowedIPs":"0.0.0.0/0","useSrtp":true,"vkLink":"https://vk.ru/call/join/synthetic"
-            }})
+            link,
+            include_str!("../tests/fixtures/upstream-ios-import.url")
         );
         assert!(ios::link(
             &peer,

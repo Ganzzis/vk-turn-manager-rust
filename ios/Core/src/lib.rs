@@ -357,6 +357,22 @@ mod tests {
     }
 
     #[test]
+    fn imports_upstream_v1_fixture() {
+        let uri = include_str!("../../../tests/fixtures/upstream-ios-import.url").trim();
+        let imported = decode_link(uri).unwrap();
+        assert!(imported.transport == Transport::Srtp);
+        assert_eq!(imported.name, "demo");
+        assert_eq!(imported.address, "172.21.7.2/32");
+        assert_eq!(imported.endpoint, "srtp.example:56004");
+        assert_eq!(imported.allowed_ips, "0.0.0.0/0");
+        assert_eq!(
+            imported.vk_link.as_deref(),
+            Some("https://vk.ru/call/join/synthetic")
+        );
+        assert!(Tunnel::new(&imported).is_none());
+    }
+
+    #[test]
     fn imports_verified_shape_and_refuses_srtp_in_direct_engine() {
         let p = direct();
         let fixture = serde_json::json!({"type":"connection","version":1,"settings":{

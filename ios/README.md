@@ -31,9 +31,32 @@ cargo test --manifest-path ios/Core/Cargo.toml --locked
 
 ## Подпись и iPhone
 
-1. В аккаунте Apple Developer заведите идентификаторы приложения и расширения. По умолчанию используются `org.ganzzis.vkturn` и `org.ganzzis.vkturn.packet-tunnel`. При необходимости задайте свой `VK_BUNDLE_ID`.
-2. Для обоих target включите **Network Extensions → Packet Tunnel** и **Keychain Sharing**. Выберите одну команду подписи, зарегистрируйте устройство и обновите provisioning profiles. Значение `VK_KEYCHAIN_GROUP` должно совпадать в обоих target, их Info.plist и профилях подписи. По умолчанию оно определяется как `TEAM_ID.bundle-id.shared`. При отличающемся App Identifier Prefix переопределите это значение.
-3. Соберите и установите приложение с подписью из Xcode. На физическом iPhone добавьте синтетический пир, разрешите установку VPN-конфигурации, проверьте WireGuard-рукопожатие на тестовом сервере и IP-трафик, затем отключите туннель. Симуляторные тесты выполняют FFI и CRUD на тестовом хранилище. Реальные entitlement, общий Keychain и жизненный цикл системного туннеля проверяются на устройстве.
+Для использования оригинального VK TURN Proxy iOS подписывать это приложение не требуется. [Серверная совместимость и проверка оригинального клиента](../docs/ios-compatibility.md).
+
+### Идентификаторы и разрешения
+
+1. В Apple Developer зарегистрируйте два явных App ID. Задайте собственный `VK_BUNDLE_ID` для **VKMobile**. Идентификатор **PacketTunnel** будет `VK_BUNDLE_ID.packet-tunnel`. Используйте одну команду подписи для обоих target.
+2. Включите **Network Extensions → Packet Tunnel** и **Keychain Sharing** у обоих target. Для приложения и расширения значение `com.apple.developer.networking.networkextension` должно включать `packet-tunnel-provider` в подписанном коде и provisioning profiles. В архивированном приложении проверьте наличие `PlugIns/PacketTunnel.appex` и extension point `com.apple.networkextension.packet-tunnel`.
+3. Выберите одну общую Keychain access group для обоих target. Значение `VK_KEYCHAIN_GROUP` в проекте должно раскрываться в одно и то же конкретное имя в `VKKeychainGroup` обоих Info.plist и в подписанных `keychain-access-groups`. Профили должны разрешать эту группу. По умолчанию проект использует `TEAM_ID.bundle-id.shared`. Если App Identifier Prefix отличается от Team ID, переопределите `VK_KEYCHAIN_GROUP` с правильным префиксом.
+4. **App Groups** нужны при добавлении общего файлового контейнера или `UserDefaults(suiteName:)` между процессами. Текущая сборка использует общий Keychain и собственные настройки приложения. Если вашей сборке требуется общий контейнер, зарегистрируйте `group.<ваш-id>`, назначьте группу обоим App ID и добавьте один и тот же `com.apple.security.application-groups` в оба файла entitlements. Обновите оба provisioning profile и передайте ожидаемую группу через `--app-group` при проверке.
+5. Зарегистрируйте UDID iPhone, обновите профили после изменения capabilities и создайте подписанный архив в Xcode. Экспортируйте development или ad hoc IPA для зарегистрированного устройства. Сертификаты, приватные ключи, профили подписи, IPA и UDID держите в закрытом хранилище.
+
+Подробнее в документации Apple. [Network Extensions](https://developer.apple.com/documentation/bundleresources/entitlements/com.apple.developer.networking.networkextension), [App Groups](https://developer.apple.com/documentation/xcode/configuring-app-groups), [Keychain Sharing](https://developer.apple.com/documentation/security/sharing-access-to-keychain-items-among-a-collection-of-apps), [Provisioning Profiles](https://developer.apple.com/documentation/technotes/tn3125-inside-code-signing-provisioning-profiles).
+
+### Проверка подписанного IPA и устройства
+
+На Mac из корня репозитория выполните:
+
+```sh
+python3 ios/scripts/check-signing.py /path/to/VKMobile.ipa \
+  --bundle-id org.example.vkturn --team-id YOUR_TEAM_ID --device-udid "$IPHONE_UDID"
+```
+
+Если включили App Groups, добавьте `--app-group group.org.example.vkturn` для каждой ожидаемой группы. Иначе проверка требует отсутствия App Groups в подписи. Скрипт проверяет подписи приложения и расширения, сертификат в каждом профиле, Team ID и явные App ID, срок действия профилей и наличие UDID, Packet Tunnel, App Groups и общую Keychain access group. Он удаляет временную распаковку после проверки и выводит только результат. Команда предназначена для подписанных development и ad hoc IPA с embedded profiles.
+
+Установите **тот же IPA** на зарегистрированный физический iPhone. После разблокировки устройства создайте профиль с отдельным тестовым пиром, закройте и снова откройте приложение, убедитесь, что профиль доступен. Запустите VPN и подтвердите системный запрос. Проверьте, что Packet Tunnel прочитал профиль из общего Keychain, WireGuard установил рукопожатие, через туннель проходит IPv4-трафик в обе стороны и VPN штатно останавливается и запускается повторно. Включите проверку общего контейнера, если добавили App Groups. Зафиксируйте номер сборки, модель iPhone, версию iOS и результаты без конфигураций и ключей.
+
+Заявлять поддержку VPN в собственной сборке можно после успешной проверки подписанного IPA и туннеля на устройстве. Текущая реализация нацелена на прямой WireGuard. Импорт SRTP-профиля проверяется отдельно и не подтверждает поддержку SRTP-туннеля в приложении.
 
 ## Upstream и лицензии
 
