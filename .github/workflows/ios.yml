@@ -52,3 +52,15 @@ jobs:
           xcodebuild archive -project VKMobile.xcodeproj -scheme VKMobile \
             -destination 'generic/platform=iOS' -archivePath build/VKMobile.xcarchive \
             CODE_SIGNING_ALLOWED=NO
+      - name: Package unsigned archive and source notices
+        working-directory: ios
+        run: |
+          mkdir -p build/distribution
+          ditto -c -k --keepParent build/VKMobile.xcarchive build/distribution/VKMobile-unsigned.zip
+          python3 scripts/notices.py build/distribution/third-party-notices
+      - uses: actions/upload-artifact@v6
+        with:
+          name: VKMobile-unsigned-device-archive
+          path: ios/build/distribution
+          if-no-files-found: error
+          retention-days: 7
