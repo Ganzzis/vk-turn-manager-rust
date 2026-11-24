@@ -1,0 +1,77 @@
+name: VKMobile
+options:
+  deploymentTarget:
+    iOS: "17.0"
+settings:
+  base:
+    SWIFT_VERSION: "5.0"
+    VK_BUNDLE_ID: org.ganzzis.vkturn
+    VK_KEYCHAIN_GROUP: "$(DEVELOPMENT_TEAM).$(VK_BUNDLE_ID).shared"
+    MARKETING_VERSION: "0.3.0"
+    CURRENT_PROJECT_VERSION: "1"
+    SWIFT_OBJC_BRIDGING_HEADER: "$(SRCROOT)/Bridge/MobileCore.h"
+    LIBRARY_SEARCH_PATHS: "$(inherited) $(SRCROOT)/build/rust/$(PLATFORM_NAME)"
+    OTHER_LDFLAGS: "$(inherited) -lvk_mobile_core"
+    ENABLE_USER_SCRIPT_SANDBOXING: YES
+targets:
+  VKMobile:
+    type: application
+    platform: iOS
+    sources:
+      - App
+      - Shared
+    dependencies:
+      - target: PacketTunnel
+        embed: true
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: "$(VK_BUNDLE_ID)"
+        CODE_SIGN_ENTITLEMENTS: App/VKMobile.entitlements
+    info:
+      path: App/Info.plist
+      properties:
+        CFBundleDisplayName: VK TURN Manager
+        UILaunchScreen: {}
+        VKKeychainGroup: "$(VK_KEYCHAIN_GROUP)"
+        CFBundleURLTypes:
+          - CFBundleURLName: "$(VK_BUNDLE_ID).connection"
+            CFBundleURLSchemes: [vkturnproxy]
+  PacketTunnel:
+    type: app-extension
+    platform: iOS
+    sources:
+      - Tunnel
+      - Shared
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: "$(VK_BUNDLE_ID).packet-tunnel"
+        CODE_SIGN_ENTITLEMENTS: Tunnel/PacketTunnel.entitlements
+        APPLICATION_EXTENSION_API_ONLY: YES
+    info:
+      path: Tunnel/Info.plist
+      properties:
+        VKKeychainGroup: "$(VK_KEYCHAIN_GROUP)"
+        NSExtension:
+          NSExtensionPointIdentifier: com.apple.networkextension.packet-tunnel
+          NSExtensionPrincipalClass: "$(PRODUCT_MODULE_NAME).PacketTunnelProvider"
+  VKMobileTests:
+    type: bundle.unit-test
+    platform: iOS
+    sources:
+      - Tests
+      - Shared
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: "$(VK_BUNDLE_ID).tests"
+        GENERATE_INFOPLIST_FILE: YES
+schemes:
+  VKMobile:
+    build:
+      targets:
+        VKMobile: all
+        PacketTunnel: all
+        VKMobileTests: [test]
+    test:
+      targets: [VKMobileTests]
+    archive:
+      config: Release
