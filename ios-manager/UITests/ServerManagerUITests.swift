@@ -13,7 +13,8 @@ final class ServerManagerUITests: XCTestCase {
         for (name, host) in [(first, "192.0.2.10"), (second, "192.0.2.11")] {
             app.buttons["Добавить VPS"].tap()
             let nameField = app.textFields["Название"]
-            XCTAssertTrue(nameField.waitForExistence(timeout: 5))
+            let ready = XCTNSPredicateExpectation(predicate: NSPredicate(format: "hittable == true"), object: nameField)
+            XCTAssertEqual(XCTWaiter.wait(for: [ready], timeout: 12), .completed)
             nameField.tap()
             nameField.typeText(name)
             let hostField = app.textFields["IP-адрес или DNS-имя"]
@@ -27,9 +28,10 @@ final class ServerManagerUITests: XCTestCase {
             let error = app.staticTexts["save-error"]
             XCTAssertTrue(row(host).waitForExistence(timeout: 8),
                           error.exists ? error.label : "The server row did not appear after saving.")
+            app.terminate()
+            app.launch()
+            XCTAssertTrue(row(host).waitForExistence(timeout: 8))
         }
-        app.terminate()
-        app.launch()
         XCTAssertTrue(row("192.0.2.10").waitForExistence(timeout: 8))
         XCTAssertTrue(row("192.0.2.11").exists)
     }
