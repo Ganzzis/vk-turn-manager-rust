@@ -151,7 +151,8 @@ async fn exchange(
     let (dtls_tx, dtls_rx) = mpsc::channel(QUEUE);
     let (srtp_tx, mut srtp_rx) = mpsc::channel(QUEUE);
     let socket = relay.clone();
-    let reader = tokio::spawn(async move {
+    let mut readers = tokio::task::JoinSet::new();
+    readers.spawn(async move {
         let mut buffer = [0; 2048];
         while let Ok((n, sender)) = socket.recv_from(&mut buffer).await {
             if sender != peer || n == 0 {
@@ -292,7 +293,7 @@ async fn exchange(
         }
     }
     .await;
-    reader.abort();
+    readers.shutdown().await;
     result
 }
 
@@ -307,15 +308,23 @@ async fn run(
     let result = async {
         let expires = credentials.expiry().filter(|duration| *duration > Duration::from_secs(30) && *duration <= Duration::from_secs(86400)).ok_or(NEED_CREDENTIALS)?;
         let deadline = tokio::time::Instant::now() + expires;
-        let relay_addr = timeout(Duration::from_secs(5), address(&credentials.address))
-            .await.ok().flatten().ok_or(TURN_FAILED)?;
-        let peer = timeout(Duration::from_secs(5), address(&endpoint))
-            .await.ok().flatten().ok_or(TURN_FAILED)?;
-        let transport: Arc<dyn Conn + Send + Sync> = if credentials.use_tcp.unwrap_or(true) {
-            Arc::new(timeout(Duration::from_secs(5), tcp::TurnTcp::connect(relay_addr))
-                .await.map_err(|_| TURN_FAILED)?.map_err(|_| TURN_FAILED)?)
-        } else {
-            Arc::new(UdpSocket::bind("0.0.0.0:0").await.map_err(|_| TURN_FAILED)?)
+        let (transport, relay_addr, peer) = tokio::select! {
+            biased;
+            _ = &mut stopped => return Ok(()),
+            _ = tokio::time::sleep_until(deadline) => return Err(NEED_CREDENTIALS),
+            result = async {
+                let relay_addr = timeout(Duration::from_secs(5), address(&credentials.address))
+                    .await.ok().flatten().ok_or(TURN_FAILED)?;
+                let peer = timeout(Duration::from_secs(5), address(&endpoint))
+                    .await.ok().flatten().ok_or(TURN_FAILED)?;
+                let transport: Arc<dyn Conn + Send + Sync> = if credentials.use_tcp.unwrap_or(true) {
+                    Arc::new(timeout(Duration::from_secs(5), tcp::TurnTcp::connect(relay_addr))
+                        .await.map_err(|_| TURN_FAILED)?.map_err(|_| TURN_FAILED)?)
+                } else {
+                    Arc::new(UdpSocket::bind("0.0.0.0:0").await.map_err(|_| TURN_FAILED)?)
+                };
+                Ok::<_, i32>((transport, relay_addr, peer))
+            } => result?,
         };
         let client = Client::new(ClientConfig {
             stun_serv_addr: String::new(), turn_serv_addr: relay_addr.to_string(),
@@ -325,24 +334,31 @@ async fn run(
         }).await.map_err(|_| TURN_FAILED)?;
         client.listen().await.map_err(|_| TURN_FAILED)?;
         let acquired = tokio::select! {
-            result = timeout(Duration::from_secs(8), client.allocate()) => result,
-            _ = &mut stopped => {
-                let _ = timeout(Duration::from_secs(1), client.close()).await;
-                return Ok(());
+            biased;
+            _ = &mut stopped => Ok(None),
+            _ = tokio::time::sleep_until(deadline) => Err(NEED_CREDENTIALS),
+            result = timeout(Duration::from_secs(8), client.allocate()) => {
+                match result {
+                    Ok(Ok(socket)) => Ok(Some(socket)),
+                    _ => Err(TURN_FAILED),
+                }
             }
         };
         let result = match acquired {
-            Ok(Ok(socket)) => {
+            Ok(Some(socket)) => {
                 let socket = Arc::new(socket);
                 let result = tokio::select! {
-                    outcome = exchange(socket.clone(), peer, &credentials, &mut outgoing, &incoming, &status) => outcome,
+                    biased;
+                    _ = &mut stopped => Ok(()),
                     _ = tokio::time::sleep_until(deadline) => Err(NEED_CREDENTIALS),
-                    _ = stopped => Ok(()),
+                    outcome = exchange(socket.clone(), peer, &credentials, &mut outgoing, &incoming, &status) => outcome,
                 };
+                status.store(result.as_ref().err().copied().unwrap_or(RELAY_LOST), Ordering::Release);
                 let _ = timeout(Duration::from_secs(1), socket.close()).await;
                 result
             }
-            _ => Err(TURN_FAILED),
+            Ok(None) => Ok(()),
+            Err(error) => Err(error),
         };
         let _ = timeout(Duration::from_secs(1), client.close()).await;
         result
@@ -354,7 +370,19 @@ struct Handle {
     status: Arc<AtomicI32>,
     outgoing: mpsc::Sender<Vec<u8>>,
     incoming: mpsc::Receiver<Vec<u8>>,
-    _stop: oneshot::Sender<()>,
+    stop: Option<oneshot::Sender<()>>,
+    worker: Option<std::thread::JoinHandle<()>>,
+}
+
+impl Drop for Handle {
+    fn drop(&mut self) {
+        if let Some(stop) = self.stop.take() {
+            let _ = stop.send(());
+        }
+        if let Some(worker) = self.worker.take() {
+            let _ = worker.join();
+        }
+    }
 }
 
 fn start(endpoint: String, credentials: Credentials) -> Option<Box<Handle>> {
@@ -363,21 +391,25 @@ fn start(endpoint: String, credentials: Credentials) -> Option<Box<Handle>> {
     let (stop, stopped) = oneshot::channel();
     let status = Arc::new(AtomicI32::new(INITIALIZING));
     let worker = status.clone();
-    std::thread::Builder::new()
+    let thread = std::thread::Builder::new()
         .name("vk-srtp".into())
         .spawn(move || {
             match tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()
             {
-                Ok(runtime) => runtime.block_on(run(
-                    endpoint,
-                    credentials,
-                    from_app,
-                    to_app,
-                    stopped,
-                    worker,
-                )),
+                Ok(runtime) => {
+                    runtime.block_on(run(
+                        endpoint,
+                        credentials,
+                        from_app,
+                        to_app,
+                        stopped,
+                        worker,
+                    ));
+                    // A cancelled OS DNS lookup can still be running in Tokio's blocking pool.
+                    runtime.shutdown_timeout(Duration::from_millis(100));
+                }
                 Err(_) => worker.store(TURN_FAILED, Ordering::Release),
             }
         })
@@ -386,7 +418,8 @@ fn start(endpoint: String, credentials: Credentials) -> Option<Box<Handle>> {
         status,
         outgoing,
         incoming,
-        _stop: stop,
+        stop: Some(stop),
+        worker: Some(thread),
     }))
 }
 
@@ -417,6 +450,9 @@ pub unsafe extern "C" fn vkt_relay_send(value: *mut c_void, data: *const u8, len
     let Some(h) = (unsafe { value.cast::<Handle>().as_ref() }) else {
         return -1;
     };
+    if h.status.load(Ordering::Acquire) != READY {
+        return 0;
+    }
     let bytes = unsafe { std::slice::from_raw_parts(data, len) };
     i32::from(h.outgoing.try_send(bytes.to_vec()).is_ok())
 }
@@ -433,6 +469,9 @@ pub unsafe extern "C" fn vkt_relay_receive(
     let Some(h) = (unsafe { value.cast::<Handle>().as_mut() }) else {
         return 0;
     };
+    if h.status.load(Ordering::Acquire) != READY {
+        return 0;
+    }
     let Ok(packet) = h.incoming.try_recv() else {
         return 0;
     };
@@ -560,8 +599,75 @@ mod tests {
         compatible_path(true).await;
     }
 
+    async fn start_server(srtp_endpoint: SocketAddr, backend_addr: SocketAddr) -> ChildGuard {
+        let mut server = ChildGuard(
+            Command::new(std::env::var_os("VK_SRTP_SERVER").expect("set VK_SRTP_SERVER"))
+                .args([
+                    "-srtp",
+                    "-listen",
+                    &srtp_endpoint.to_string(),
+                    "-connect",
+                    &backend_addr.to_string(),
+                ])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+                .unwrap(),
+        );
+        tokio::time::sleep(Duration::from_millis(250)).await;
+        assert!(server.0.try_wait().unwrap().is_none());
+        server
+    }
+
+    async fn wait_status(handle: &Handle, expected: i32, limit: Duration) {
+        timeout(limit, async {
+            loop {
+                let status = handle.status.load(Ordering::Acquire);
+                if status == expected {
+                    break;
+                }
+                assert!(
+                    status == INITIALIZING || status == READY,
+                    "unexpected relay status {status}"
+                );
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("relay status transition");
+    }
+
+    async fn wait_no_allocations(turn: &Server) {
+        timeout(Duration::from_secs(3), async {
+            while !turn.get_allocations_info(None).await.unwrap().is_empty() {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("TURN allocation released");
+    }
+
+    #[tokio::test]
+    async fn stopping_pending_allocation_joins_worker_and_closes_queues() {
+        let silent = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let address = silent.local_addr().unwrap();
+        let mut handle = start(address.to_string(), credentials(address)).unwrap();
+        let mut packet = [0; 2048];
+        timeout(Duration::from_secs(3), silent.recv_from(&mut packet))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_relay_blocks_packets(&mut handle);
+        let outgoing = handle.outgoing.clone();
+        let mut incoming = std::mem::replace(&mut handle.incoming, mpsc::channel(1).1);
+        let before = std::time::Instant::now();
+        drop(handle);
+        assert!(before.elapsed() < Duration::from_secs(3));
+        assert!(outgoing.is_closed());
+        assert_eq!(incoming.recv().await, None);
+    }
+
     async fn compatible_path(use_tcp: bool) {
-        let executable = std::env::var_os("VK_SRTP_SERVER").expect("set VK_SRTP_SERVER");
         let listener = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
         let turn_endpoint = listener.local_addr().unwrap();
         let turn = Server::new(ServerConfig {
@@ -585,22 +691,7 @@ mod tests {
         let free = UdpSocket::bind("127.0.0.1:0").await.unwrap();
         let srtp_endpoint = free.local_addr().unwrap();
         drop(free);
-        let mut _server = ChildGuard(
-            Command::new(executable)
-                .args([
-                    "-srtp",
-                    "-listen",
-                    &srtp_endpoint.to_string(),
-                    "-connect",
-                    &backend_addr.to_string(),
-                ])
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .spawn()
-                .unwrap(),
-        );
-        tokio::time::sleep(Duration::from_millis(250)).await;
-        assert!(_server.0.try_wait().unwrap().is_none());
+        let server = start_server(srtp_endpoint, backend_addr).await;
         let server_private = StaticSecret::from([29; 32]);
         let client_private = StaticSecret::from([17; 32]);
         let server_public = PublicKey::from(&server_private);
@@ -640,6 +731,14 @@ mod tests {
         let mut credentials =
             credentials(tcp.as_ref().map_or(turn_endpoint, |(address, _)| *address));
         credentials.use_tcp = Some(use_tcp);
+        if use_tcp {
+            credentials.expires_at = (SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_secs()
+                + 34)
+                .to_string();
+        }
         if !use_tcp {
             let mut wrong_pin = credentials.clone();
             wrong_pin.certificate_sha256 = Some("00".repeat(32));
@@ -657,22 +756,78 @@ mod tests {
             .await
             .expect("DTLS certificate pin rejected");
         }
-        let mut handle = start(srtp_endpoint.to_string(), credentials).unwrap();
-        timeout(Duration::from_secs(15), async {
-            loop {
-                match handle.status.load(Ordering::Acquire) {
-                    READY => break,
-                    INITIALIZING => tokio::time::sleep(Duration::from_millis(20)).await,
-                    code => panic!("relay failed with stage code {code}"),
-                }
-            }
-        })
-        .await
-        .expect("relay ready");
-        let mut client = Tunnel {
-            wg: Tunn::new(client_private, server_public, None, None, 1, None),
+        let mut handle = start(srtp_endpoint.to_string(), credentials.clone()).unwrap();
+        wait_status(&handle, READY, Duration::from_secs(15)).await;
+        let new_tunnel = || Tunnel {
+            wg: Tunn::new(client_private.clone(), server_public, None, None, 1, None),
             routes: vec![(0, 0)],
         };
+        let mut client = new_tunnel();
+        authenticate(&mut client, &mut handle).await;
+        round_trip(&mut client, &mut handle).await;
+
+        if use_tcp {
+            wait_status(&handle, NEED_CREDENTIALS, Duration::from_secs(40)).await;
+            assert_relay_blocks_packets(&mut handle);
+            drop(handle);
+            wait_no_allocations(&turn).await;
+            let (_, task) = tcp.unwrap();
+            timeout(Duration::from_secs(3), task)
+                .await
+                .expect("TCP control closed")
+                .unwrap();
+        } else {
+            let idle_allocation = turn.get_allocations_info(None).await.unwrap();
+            assert_eq!(idle_allocation.len(), 1);
+            // Exceed the 35s echo watchdog while idle. Only authenticated PING
+            // echoes can keep this allocation alive; they must not reach WireGuard.
+            assert!(timeout(Duration::from_secs(45), handle.incoming.recv())
+                .await
+                .is_err());
+            assert_eq!(handle.status.load(Ordering::Acquire), READY);
+            let still_allocated = turn.get_allocations_info(None).await.unwrap();
+            assert_eq!(still_allocated.len(), 1);
+            assert!(still_allocated
+                .keys()
+                .all(|key| idle_allocation.contains_key(key)));
+            let stale_datagram = round_trip(&mut client, &mut handle).await;
+
+            drop(server);
+            wait_status(&handle, RELAY_LOST, Duration::from_secs(45)).await;
+            assert_relay_blocks_packets(&mut handle);
+            drop(handle);
+            wait_no_allocations(&turn).await;
+
+            let _replacement = start_server(srtp_endpoint, backend_addr).await;
+            let mut handle = start(srtp_endpoint.to_string(), credentials).unwrap();
+            wait_status(&handle, READY, Duration::from_secs(15)).await;
+            let mut client = new_tunnel();
+            let mut buffer = [0; 2048];
+            assert_ne!(client.step(2, &stale_datagram, &mut buffer).0, 2);
+            authenticate(&mut client, &mut handle).await;
+            assert_ne!(client.step(2, &stale_datagram, &mut buffer).0, 2);
+            round_trip(&mut client, &mut handle).await;
+            let outgoing = handle.outgoing.clone();
+            drop(handle);
+            assert!(outgoing.is_closed());
+            wait_no_allocations(&turn).await;
+        }
+        echo.abort();
+        assert!(echo.await.unwrap_err().is_cancelled());
+        turn.close().await.unwrap();
+    }
+
+    fn assert_relay_blocks_packets(handle: &mut Handle) {
+        let raw = std::ptr::from_mut(handle).cast();
+        let mut packet = [0; LIMIT];
+        assert_eq!(unsafe { vkt_relay_send(raw, packet.as_ptr(), 20) }, 0);
+        assert_eq!(
+            unsafe { vkt_relay_receive(raw, packet.as_mut_ptr(), LIMIT) },
+            0
+        );
+    }
+
+    async fn authenticate(client: &mut Tunnel, handle: &mut Handle) {
         let mut buffer = [0; 2048];
         assert!(client.wg.time_since_last_handshake().is_none());
         let (1, n) = client.step(0, &[], &mut buffer) else {
@@ -688,6 +843,10 @@ mod tests {
         };
         assert!(client.wg.time_since_last_handshake().is_some());
         handle.outgoing.send(buffer[..n].to_vec()).await.unwrap();
+    }
+
+    async fn round_trip(client: &mut Tunnel, handle: &mut Handle) -> Vec<u8> {
+        let mut buffer = [0; 2048];
         let mut ip = [0; 20];
         ip[0] = 0x45;
         ip[3] = 20;
@@ -705,11 +864,6 @@ mod tests {
         };
         assert_eq!(n, 20);
         assert_eq!(&buffer[12..20], &[192, 0, 2, 1, 192, 0, 2, 2]);
-        drop(handle);
-        echo.abort();
-        if let Some((_, task)) = tcp {
-            task.abort();
-        }
-        turn.close().await.unwrap();
+        packet
     }
 }

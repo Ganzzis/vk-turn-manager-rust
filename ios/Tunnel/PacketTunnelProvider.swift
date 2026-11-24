@@ -66,9 +66,9 @@ final class Session {
     private var timer: DispatchSourceTimer?
     private var startupDeadline: DispatchTime
     private var applying = false
-    private var routesInstalled = false
+    private var packetGate = PacketFlowGate()
     private var readingPackets = false
-    private var running = false
+    private var running: Bool { packetGate.active }
     private var receiving = false
     private var outbound = 0
     private var inbound = 0
@@ -171,7 +171,7 @@ final class Session {
             vkt_relay_free(relay)
             self.relay = nil
         }
-        running = false
+        packetGate.pause()
         provider?.reasserting = false
         if let core {
             vkt_tunnel_free(core)
@@ -238,20 +238,23 @@ final class Session {
     }
 
     private func reconnectRelay() {
-        guard routesInstalled, running, !retryUsed, let json = relayProfileJSON,
+        guard packetGate.routesInstalled, running, !retryUsed, let json = relayProfileJSON,
               let newCore = json.withCString({ vkt_tunnel_new($0) }) else {
             fail(.socket)
             return
+        }
+        retryUsed = true
+        packetGate.pause()
+        provider?.reasserting = true
+        if let relay {
+            vkt_relay_free(relay)
+            self.relay = nil
         }
         guard let newRelay = json.withCString({ vkt_relay_new($0) }) else {
             vkt_tunnel_free(newCore)
             fail(.socket)
             return
         }
-        retryUsed = true
-        provider?.reasserting = true
-        running = false
-        if let relay { vkt_relay_free(relay) }
         if let core { vkt_tunnel_free(core) }
         core = newCore
         relay = newRelay
@@ -261,8 +264,8 @@ final class Session {
 
     private func installRoutesIfAuthenticated() {
         guard !applying, !running, let core, vkt_tunnel_ready(core) == 1, let provider else { return }
-        if routesInstalled {
-            running = true
+        if packetGate.routesInstalled {
+            packetGate.activate()
             provider.reasserting = false
             readPackets()
             return
@@ -276,8 +279,7 @@ final class Session {
                     self.fail(.networkSettings)
                 } else {
                     self.applying = false
-                    self.routesInstalled = true
-                    self.running = true
+                    self.packetGate.activate()
                     let pending = self.startup
                     self.startup = nil
                     pending?(nil)
@@ -288,17 +290,19 @@ final class Session {
     }
 
     private func readPackets() {
-        guard !readingPackets, let provider else { return }
+        guard running, !readingPackets, let provider else { return }
+        let generation = packetGate.generation
         readingPackets = true
         provider.packetFlow.readPackets { [weak self] packets, families in
             guard let self else { return }
             self.queue.async {
                 self.readingPackets = false
-                guard self.running, self.core != nil else { return }
+                guard self.core != nil else { return }
+                defer { self.readPackets() }
+                guard self.packetGate.accepts(generation) else { return }
                 for (packet, family) in zip(packets, families) where family.int32Value == AF_INET && self.pendingSends < 256 {
                     if self.step(1, packet) == 1 { self.outbound += 1 }
                 }
-                self.readPackets()
             }
         }
     }
@@ -313,7 +317,8 @@ final class Session {
                                 data.count, output.baseAddress, output.count, &written)
             }
         }
-        if event == 1, let relay {
+        if event == 1, relayProfileJSON != nil {
+            guard let relay else { return 0 }
             return buffer.withUnsafeBufferPointer { vkt_relay_send(relay, $0.baseAddress, written) }
         }
         if event == 1, let connection, pendingSends < 256 {
