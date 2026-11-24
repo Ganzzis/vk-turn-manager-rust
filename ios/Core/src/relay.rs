@@ -75,9 +75,13 @@ impl Credentials {
                 .is_none_or(|pin| pin.len() == 64 && pin.bytes().all(|b| b.is_ascii_hexdigit()))
     }
 
-    fn expiry(&self) -> Option<Duration> {
+    pub(super) fn remaining_at(&self, now: SystemTime) -> Option<Duration> {
         let expiry = Duration::from_secs(self.expires_at.parse().ok()?);
-        expiry.checked_sub(SystemTime::now().duration_since(UNIX_EPOCH).ok()?)
+        expiry
+            .checked_sub(now.duration_since(UNIX_EPOCH).ok()?)
+            .filter(|remaining| {
+                *remaining > Duration::from_secs(30) && *remaining <= Duration::from_secs(86400)
+            })
     }
 }
 
@@ -306,7 +310,7 @@ async fn run(
     status: Arc<AtomicI32>,
 ) {
     let result = async {
-        let expires = credentials.expiry().filter(|duration| *duration > Duration::from_secs(30) && *duration <= Duration::from_secs(86400)).ok_or(NEED_CREDENTIALS)?;
+        let expires = credentials.remaining_at(SystemTime::now()).ok_or(NEED_CREDENTIALS)?;
         let deadline = tokio::time::Instant::now() + expires;
         let (transport, relay_addr, peer) = tokio::select! {
             biased;
@@ -551,7 +555,7 @@ mod tests {
         let mut value = credentials("127.0.0.1:3478".parse().unwrap());
         assert!(value.valid());
         value.expires_at = "0".into();
-        assert!(value.expiry().is_none());
+        assert!(value.remaining_at(SystemTime::now()).is_none());
         value.certificate_sha256 = Some("bad pin".into());
         assert!(!value.valid());
     }

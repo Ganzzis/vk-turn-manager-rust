@@ -268,6 +268,27 @@ pub unsafe extern "C" fn vkt_validate(value: *const c_char) -> i32 {
     i32::from(unsafe { profile(value) }.is_some_and(|p| validate(&p)))
 }
 
+fn connection_preflight(p: &Profile, now: std::time::SystemTime) -> i32 {
+    if !validate(p) {
+        return 0;
+    }
+    if p.transport == Transport::Direct {
+        return 1;
+    }
+    match &p.relay {
+        None => -1,
+        Some(credentials) if credentials.remaining_at(now).is_none() => -2,
+        Some(_) => 1,
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn vkt_connection_preflight(value: *const c_char) -> i32 {
+    unsafe { profile(value) }.map_or(0, |p| {
+        connection_preflight(&p, std::time::SystemTime::now())
+    })
+}
+
 #[no_mangle]
 pub unsafe extern "C" fn vkt_import(value: *const c_char) -> *mut c_char {
     unsafe { input_text(value) }
@@ -359,6 +380,31 @@ mod tests {
             transport: Transport::Direct,
             vk_link: None,
             relay: None,
+        }
+    }
+
+    #[test]
+    fn preflight_separates_import_from_connect_and_checks_expiry() {
+        use std::time::{Duration, UNIX_EPOCH};
+
+        let now = UNIX_EPOCH + Duration::from_secs(100_000);
+        assert_eq!(connection_preflight(&direct(), now), 1);
+        let uri = include_str!("../../../tests/fixtures/upstream-ios-import.url").trim();
+        let mut imported = decode_link(uri).unwrap();
+        assert_eq!(connection_preflight(&imported, now), -1);
+        for (expires_at, expected) in [
+            (99_999, -2),
+            (100_030, -2),
+            (100_031, 1),
+            (186_400, 1),
+            (186_401, -2),
+        ] {
+            imported.relay = serde_json::from_value(serde_json::json!({
+                "address": "turn.example:3478", "username": "synthetic",
+                "password": "synthetic", "expiresAt": expires_at.to_string()
+            }))
+            .unwrap();
+            assert_eq!(connection_preflight(&imported, now), expected);
         }
     }
 
