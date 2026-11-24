@@ -640,6 +640,23 @@ mod tests {
         let mut credentials =
             credentials(tcp.as_ref().map_or(turn_endpoint, |(address, _)| *address));
         credentials.use_tcp = Some(use_tcp);
+        if !use_tcp {
+            let mut wrong_pin = credentials.clone();
+            wrong_pin.certificate_sha256 = Some("00".repeat(32));
+            let rejected = start(srtp_endpoint.to_string(), wrong_pin).unwrap();
+            timeout(Duration::from_secs(15), async {
+                loop {
+                    let stage = rejected.status.load(Ordering::Acquire);
+                    if stage != INITIALIZING {
+                        assert_eq!(stage, DTLS_FAILED);
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+            })
+            .await
+            .expect("DTLS certificate pin rejected");
+        }
         let mut handle = start(srtp_endpoint.to_string(), credentials).unwrap();
         timeout(Duration::from_secs(15), async {
             loop {
