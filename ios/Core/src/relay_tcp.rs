@@ -20,7 +20,11 @@ pub(super) struct TurnTcp {
 
 impl TurnTcp {
     pub(super) async fn connect(peer: SocketAddr) -> Result<Self> {
-        let socket = TcpStream::connect(peer).await?;
+        Self::from_stream(TcpStream::connect(peer).await?)
+    }
+
+    pub(super) fn from_stream(socket: TcpStream) -> Result<Self> {
+        let peer = socket.peer_addr()?;
         let local = socket.local_addr()?;
         let (read, write) = socket.into_split();
         Ok(Self {
@@ -74,13 +78,13 @@ impl Conn for TurnTcp {
             .get(..4)
             .ok_or_else(|| connection_error("Short TURN TCP frame"))?;
         let (length, padding) = frame(header.try_into().unwrap())?;
-        if buffer.len() != length {
+        if buffer.len() != length && buffer.len() != length + padding {
             return Err(connection_error("Invalid TURN TCP length"));
         }
         let mut write = self.write.lock().await;
-        write.write_all(buffer).await?;
+        write.write_all(&buffer[..length]).await?;
         write.write_all(&[0; 3][..padding]).await?;
-        Ok(length)
+        Ok(buffer.len())
     }
     async fn send_to(&self, buffer: &[u8], peer: SocketAddr) -> Result<usize> {
         self.connect(peer).await?;

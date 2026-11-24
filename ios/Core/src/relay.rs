@@ -236,11 +236,28 @@ async fn exchange(
         getrandom::getrandom(&mut ssrc).map_err(|_| DTLS_FAILED)?;
         let mut seq = 0u16;
         let mut stamp = 0u32;
+        let probe_period = Duration::from_secs(10);
+        let mut probe = tokio::time::interval_at(tokio::time::Instant::now() + probe_period, probe_period);
+        probe.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        let mut latest_probe = 0u64;
+        let mut latest_ack = 0u64;
+        let mut last_echo = tokio::time::Instant::now();
         status.store(READY, Ordering::Release);
         loop {
             tokio::select! {
-                packet = outgoing.recv() => {
-                    let Some(packet) = packet else { return Ok(()); };
+                packet = async {
+                    tokio::select! {
+                        packet = outgoing.recv() => Ok(packet),
+                        _ = probe.tick() => {
+                            if last_echo.elapsed() >= Duration::from_secs(35) { return Err(RELAY_LOST); }
+                            latest_probe += 1;
+                            let mut ping = vec![0xff, b'P', b'N', b'G'];
+                            ping.extend(latest_probe.to_be_bytes());
+                            Ok(Some(ping))
+                        }
+                    }
+                } => {
+                    let Some(packet) = packet? else { return Ok(()); };
                     let mut rtp = Vec::with_capacity(12 + packet.len());
                     rtp.extend([0x80, 100]);
                     rtp.extend(seq.to_be_bytes());
@@ -259,7 +276,16 @@ async fn exchange(
                     // Upstream uses basic RTP without CSRC, extension or padding.
                     if plain.len() > 12 && plain.len() <= LIMIT + 12
                         && plain[0] == 0x80 && plain[1] & 0x7f == 100 {
-                        let _ = incoming.try_send(plain[12..].to_vec());
+                        let payload = &plain[12..];
+                        if payload.len() == 12 && payload.starts_with(&[0xff, b'P', b'N', b'G']) {
+                            let id = u64::from_be_bytes(payload[4..].try_into().unwrap());
+                            if id > latest_ack && id <= latest_probe {
+                                latest_ack = id;
+                                last_echo = tokio::time::Instant::now();
+                            }
+                        } else {
+                            let _ = incoming.try_send(payload.to_vec());
+                        }
                     }
                 }
             }
@@ -431,6 +457,7 @@ mod tests {
         net::IpAddr,
         process::{Child, Command, Stdio},
     };
+    use tokio::net::TcpListener;
     use turn::{
         auth::{generate_auth_key, AuthHandler},
         relay::relay_static::RelayAddressGeneratorStatic,
@@ -490,9 +517,50 @@ mod tests {
         assert!(!value.valid());
     }
 
+    // The local TURN server exposes UDP. Bridge a TCP control connection
+    // into its UDP control socket to exercise stream framing end to end.
+    async fn tcp_fixture(target: SocketAddr) -> (SocketAddr, tokio::task::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let task = tokio::spawn(async move {
+            let (tcp, _) = listener.accept().await.unwrap();
+            let tcp = tcp::TurnTcp::from_stream(tcp).unwrap();
+            let udp = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+            udp.connect(target).await.unwrap();
+            let upstream = async {
+                let mut packet = [0; 4096];
+                while let Ok(n) = tcp.recv(&mut packet).await {
+                    if udp.send(&packet[..n]).await.is_err() {
+                        break;
+                    }
+                }
+            };
+            let downstream = async {
+                let mut packet = [0; 4096];
+                while let Ok(n) = udp.recv(&mut packet).await {
+                    if tcp.send(&packet[..n]).await.is_err() {
+                        break;
+                    }
+                }
+            };
+            tokio::select! { _ = upstream => {}, _ = downstream => {} }
+        });
+        (address, task)
+    }
+
     #[tokio::test]
     #[ignore = "requires the SHA-256-verified upstream srtp-build478 executable"]
-    async fn wireguard_through_turn_and_build478() {
+    async fn wireguard_through_turn_and_build478_udp() {
+        compatible_path(false).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires the SHA-256-verified upstream srtp-build478 executable"]
+    async fn wireguard_through_turn_and_build478_tcp() {
+        compatible_path(true).await;
+    }
+
+    async fn compatible_path(use_tcp: bool) {
         let executable = std::env::var_os("VK_SRTP_SERVER").expect("set VK_SRTP_SERVER");
         let listener = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
         let turn_endpoint = listener.local_addr().unwrap();
@@ -564,7 +632,15 @@ mod tests {
             }
         });
 
-        let mut handle = start(srtp_endpoint.to_string(), credentials(turn_endpoint)).unwrap();
+        let tcp = if use_tcp {
+            Some(tcp_fixture(turn_endpoint).await)
+        } else {
+            None
+        };
+        let mut credentials =
+            credentials(tcp.as_ref().map_or(turn_endpoint, |(address, _)| *address));
+        credentials.use_tcp = Some(use_tcp);
+        let mut handle = start(srtp_endpoint.to_string(), credentials).unwrap();
         timeout(Duration::from_secs(15), async {
             loop {
                 match handle.status.load(Ordering::Acquire) {
@@ -614,6 +690,9 @@ mod tests {
         assert_eq!(&buffer[12..20], &[192, 0, 2, 1, 192, 0, 2, 2]);
         drop(handle);
         echo.abort();
+        if let Some((_, task)) = tcp {
+            task.abort();
+        }
         turn.close().await.unwrap();
     }
 }

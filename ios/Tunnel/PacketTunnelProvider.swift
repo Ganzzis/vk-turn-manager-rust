@@ -57,13 +57,17 @@ final class Session {
     private let connection: NWConnection?
     private var relay: UnsafeMutableRawPointer?
     private var relayStarted = false
+    private let relayProfileJSON: String?
+    private var retryUsed = false
     private var datagram = [UInt8](repeating: 0, count: 2048)
     private let network: NEPacketTunnelNetworkSettings
     private var core: UnsafeMutableRawPointer?
     private var startup: ((Error?) -> Void)?
     private var timer: DispatchSourceTimer?
-    private let startupDeadline: DispatchTime
+    private var startupDeadline: DispatchTime
     private var applying = false
+    private var routesInstalled = false
+    private var readingPackets = false
     private var running = false
     private var receiving = false
     private var outbound = 0
@@ -101,6 +105,7 @@ final class Session {
             ? NWConnection(host: NWEndpoint.Host(host), port: port, using: .udp) : nil
         startupDeadline = DispatchTime.now() + .seconds(profile.transport == .direct ? 20 : 42)
         guard let handle = json.withCString({ vkt_tunnel_new($0) }) else { throw MobileError.invalidProfile }
+        relayProfileJSON = profile.transport == .srtp ? json : nil
         if profile.transport == .srtp {
             guard let srtp = json.withCString({ vkt_relay_new($0) }) else {
                 vkt_tunnel_free(handle)
@@ -167,6 +172,7 @@ final class Session {
             self.relay = nil
         }
         running = false
+        provider?.reasserting = false
         if let core {
             vkt_tunnel_free(core)
             self.core = nil
@@ -215,6 +221,7 @@ final class Session {
         case -2: fail(.relayCredentials); return
         case -3: fail(.turnAllocation); return
         case -4: fail(.dtlsHandshake); return
+        case -5: reconnectRelay(); return
         default: fail(.socket); return
         }
         for _ in 0..<64 {
@@ -230,8 +237,36 @@ final class Session {
         step(3, Data())
     }
 
+    private func reconnectRelay() {
+        guard routesInstalled, running, !retryUsed, let json = relayProfileJSON,
+              let newCore = json.withCString({ vkt_tunnel_new($0) }) else {
+            fail(.socket)
+            return
+        }
+        guard let newRelay = json.withCString({ vkt_relay_new($0) }) else {
+            vkt_tunnel_free(newCore)
+            fail(.socket)
+            return
+        }
+        retryUsed = true
+        provider?.reasserting = true
+        running = false
+        if let relay { vkt_relay_free(relay) }
+        if let core { vkt_tunnel_free(core) }
+        core = newCore
+        relay = newRelay
+        relayStarted = false
+        startupDeadline = DispatchTime.now() + .seconds(42)
+    }
+
     private func installRoutesIfAuthenticated() {
         guard !applying, !running, let core, vkt_tunnel_ready(core) == 1, let provider else { return }
+        if routesInstalled {
+            running = true
+            provider.reasserting = false
+            readPackets()
+            return
+        }
         applying = true
         provider.setTunnelNetworkSettings(network) { [weak self] error in
             guard let self else { return }
@@ -240,6 +275,8 @@ final class Session {
                 if error != nil {
                     self.fail(.networkSettings)
                 } else {
+                    self.applying = false
+                    self.routesInstalled = true
                     self.running = true
                     let pending = self.startup
                     self.startup = nil
@@ -251,9 +288,12 @@ final class Session {
     }
 
     private func readPackets() {
-        provider?.packetFlow.readPackets { [weak self] packets, families in
+        guard !readingPackets, let provider else { return }
+        readingPackets = true
+        provider.packetFlow.readPackets { [weak self] packets, families in
             guard let self else { return }
             self.queue.async {
+                self.readingPackets = false
                 guard self.running, self.core != nil else { return }
                 for (packet, family) in zip(packets, families) where family.int32Value == AF_INET && self.pendingSends < 256 {
                     if self.step(1, packet) == 1 { self.outbound += 1 }
