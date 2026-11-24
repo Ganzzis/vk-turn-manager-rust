@@ -35,8 +35,11 @@ cleanup() {
 }
 trap cleanup EXIT
 
-curl --fail --silent --show-error --location --retry 2 "$release/SHA256SUMS" -o "$scratch/SHA256SUMS"
-curl --fail --silent --show-error --location --retry 2 "$release/$image" -o "$scratch/$image"
+download=(curl --fail --silent --show-error --location --retry 2 --connect-timeout 15
+  --max-time 150 --retry-max-time 330 --speed-time 30 --speed-limit 10240)
+echo "Downloading Ubuntu $version cloud image"
+"${download[@]}" "$release/SHA256SUMS" -o "$scratch/SHA256SUMS"
+"${download[@]}" "$release/$image" -o "$scratch/$image"
 (
   cd "$scratch"
   awk -v target="$image" '{name=$2; sub(/^\*/, "", name); if (name==target) print $1 "  " target}' SHA256SUMS |
@@ -81,6 +84,7 @@ wait_for_boot() {
   return 1
 }
 
+echo "Waiting for first boot of Ubuntu $version"
 before=$(wait_for_boot)
 remote "cloud-init status --wait && grep -x 'VERSION_ID=\"$version\"' /etc/os-release"
 cli_version=$("$manager" --version)
