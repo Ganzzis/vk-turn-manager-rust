@@ -54,12 +54,15 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
 final class Session {
     private weak var provider: PacketTunnelProvider?
     private let queue: DispatchQueue
-    private let connection: NWConnection
+    private let connection: NWConnection?
+    private var relay: UnsafeMutableRawPointer?
+    private var relayStarted = false
+    private var datagram = [UInt8](repeating: 0, count: 2048)
     private let network: NEPacketTunnelNetworkSettings
     private var core: UnsafeMutableRawPointer?
     private var startup: ((Error?) -> Void)?
     private var timer: DispatchSourceTimer?
-    private let startupDeadline = DispatchTime.now() + .seconds(20)
+    private let startupDeadline: DispatchTime
     private var applying = false
     private var running = false
     private var receiving = false
@@ -73,7 +76,7 @@ final class Session {
     }
 
     init(profile: Profile, provider: PacketTunnelProvider, queue: DispatchQueue, completion: @escaping (Error?) -> Void) throws {
-        guard profile.transport == .direct else { throw MobileError.unavailableTransport }
+        if profile.transport == .srtp && profile.relay == nil { throw MobileError.unavailableTransport }
         let json = try profile.coreJSON()
         guard let colon = profile.endpoint.lastIndex(of: ":"),
               let number = UInt16(profile.endpoint[profile.endpoint.index(after: colon)...]),
@@ -94,8 +97,17 @@ final class Session {
             network.dnsSettings = NEDNSSettings(servers: servers)
         }
         network.mtu = 1280
-        connection = NWConnection(host: NWEndpoint.Host(host), port: port, using: .udp)
+        connection = profile.transport == .direct
+            ? NWConnection(host: NWEndpoint.Host(host), port: port, using: .udp) : nil
+        startupDeadline = DispatchTime.now() + .seconds(profile.transport == .direct ? 20 : 42)
         guard let handle = json.withCString({ vkt_tunnel_new($0) }) else { throw MobileError.invalidProfile }
+        if profile.transport == .srtp {
+            guard let srtp = json.withCString({ vkt_relay_new($0) }) else {
+                vkt_tunnel_free(handle)
+                throw MobileError.relayCredentials
+            }
+            relay = srtp
+        }
         core = handle
         self.provider = provider
         self.queue = queue
@@ -104,10 +116,11 @@ final class Session {
 
     deinit {
         if let core { vkt_tunnel_free(core) }
+        if let relay { vkt_relay_free(relay) }
     }
 
     func start() {
-        connection.stateUpdateHandler = { [weak self] state in
+        connection?.stateUpdateHandler = { [weak self] state in
             guard let self, self.core != nil else { return }
             switch state {
             case .ready:
@@ -119,14 +132,17 @@ final class Session {
                 break
             }
         }
-        connection.start(queue: queue)
+        connection?.start(queue: queue)
         let timer = DispatchSource.makeTimerSource(queue: queue)
-        timer.schedule(deadline: .now() + .milliseconds(250), repeating: .milliseconds(250))
+        let interval = relay == nil ? 250 : 20
+        timer.schedule(deadline: .now() + .milliseconds(interval), repeating: .milliseconds(interval))
         timer.setEventHandler { [weak self] in
             guard let self, self.core != nil else { return }
             if !self.running && DispatchTime.now() >= self.startupDeadline {
                 self.fail(.handshakeTimeout)
-            } else if case .ready = self.connection.state {
+            } else if let relay = self.relay {
+                self.pollRelay(relay)
+            } else if let connection = self.connection, case .ready = connection.state {
                 self.step(3, Data())
             }
         }
@@ -144,8 +160,12 @@ final class Session {
     private func close() {
         timer?.cancel()
         timer = nil
-        connection.stateUpdateHandler = nil
-        connection.cancel()
+        connection?.stateUpdateHandler = nil
+        connection?.cancel()
+        if let relay {
+            vkt_relay_free(relay)
+            self.relay = nil
+        }
         running = false
         if let core {
             vkt_tunnel_free(core)
@@ -164,7 +184,7 @@ final class Session {
     private func receive() {
         guard !receiving else { return }
         receiving = true
-        connection.receiveMessage { [weak self] data, _, _, error in
+        connection?.receiveMessage { [weak self] data, _, _, error in
             guard let self, self.core != nil else { return }
             self.receiving = false
             if error != nil {
@@ -182,6 +202,32 @@ final class Session {
             }
             self.receive()
         }
+    }
+
+    private func pollRelay(_ handle: UnsafeMutableRawPointer) {
+        switch vkt_relay_status(handle) {
+        case 0: return
+        case 1:
+            if !relayStarted {
+                relayStarted = true
+                step(0, Data())
+            }
+        case -2: fail(.relayCredentials); return
+        case -3: fail(.turnAllocation); return
+        case -4: fail(.dtlsHandshake); return
+        default: fail(.socket); return
+        }
+        for _ in 0..<64 {
+            let count = datagram.withUnsafeMutableBufferPointer {
+                vkt_relay_receive(handle, $0.baseAddress, $0.count)
+            }
+            if count == 0 { break }
+            if step(2, Data(datagram.prefix(count))) == 1 {
+                for _ in 0..<64 { if step(2, Data()) != 1 { break } }
+            }
+        }
+        installRoutesIfAuthenticated()
+        step(3, Data())
     }
 
     private func installRoutesIfAuthenticated() {
@@ -227,7 +273,10 @@ final class Session {
                                 data.count, output.baseAddress, output.count, &written)
             }
         }
-        if event == 1 && pendingSends < 256 {
+        if event == 1, let relay {
+            return buffer.withUnsafeBufferPointer { vkt_relay_send(relay, $0.baseAddress, written) }
+        }
+        if event == 1, let connection, pendingSends < 256 {
             pendingSends += 1
             connection.send(content: Data(buffer.prefix(written)), completion: .contentProcessed { [weak self] error in
                 guard let self, self.core != nil else { return }

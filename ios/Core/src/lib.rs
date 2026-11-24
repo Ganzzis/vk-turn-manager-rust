@@ -6,6 +6,8 @@ use std::ffi::{c_char, CStr, CString};
 use std::net::{Ipv4Addr, SocketAddr};
 use std::ptr;
 
+mod relay;
+
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct Profile {
@@ -20,6 +22,7 @@ struct Profile {
     dns: Option<String>,
     transport: Transport,
     vk_link: Option<String>,
+    relay: Option<relay::Credentials>,
 }
 
 #[derive(Clone, Copy, Deserialize, PartialEq, Serialize)]
@@ -140,6 +143,7 @@ fn validate(p: &Profile) -> bool {
                     .split(',')
                     .all(|ip| ip.trim().parse::<Ipv4Addr>().is_ok())
         })
+        && p.relay.as_ref().is_none_or(relay::Credentials::valid)
         && match p.transport {
             Transport::Direct => p.vk_link.is_none(),
             Transport::Srtp => p.vk_link.as_deref().is_some_and(vk_link),
@@ -197,6 +201,7 @@ fn decode_link(uri: &str) -> Option<Profile> {
         dns: s.dns_servers.filter(|value| !value.is_empty()),
         transport: Transport::Srtp,
         vk_link: Some(s.vk_link),
+        relay: None,
     };
     validate(&profile).then_some(profile)
 }
@@ -208,7 +213,7 @@ struct Tunnel {
 
 impl Tunnel {
     fn new(p: &Profile) -> Option<Self> {
-        if p.transport != Transport::Direct || !validate(p) {
+        if (p.transport == Transport::Srtp && p.relay.is_none()) || !validate(p) {
             return None;
         }
         let private = StaticSecret::from(key(&p.private_key)?);
@@ -353,6 +358,7 @@ mod tests {
             dns: None,
             transport: Transport::Direct,
             vk_link: None,
+            relay: None,
         }
     }
 

@@ -46,9 +46,7 @@ struct ConnectionsView: View {
                         VStack(alignment: .leading, spacing: 6) {
                             Text(item.name).font(.headline)
                             Text(item.transport.title).foregroundStyle(.secondary)
-                            if item.transport == .srtp {
-                                Text("Transport unavailable in this build.").font(.footnote)
-                            } else if tunnel.activeID != item.id {
+                            if tunnel.activeID != item.id {
                                 Button("Connect") { connect(item.id) }.disabled(tunnel.busy)
                             }
                         }
@@ -157,7 +155,22 @@ private struct ProfileEditor: View {
                 if profile.transport == .srtp {
                     Section("VK call") {
                         SecureField("Call join link", text: optional($profile.vkLink))
-                        Text("SRTP transport is unavailable in this build.").foregroundStyle(.secondary)
+                        Toggle("Use temporary TURN credentials", isOn: Binding(
+                            get: { profile.relay != nil },
+                            set: { profile.relay = $0 ? RelayCredentials() : nil }
+                        ))
+                        if let relay = Binding($profile.relay) {
+                            TextField("TURN endpoint (host:port)", text: relay.address)
+                            SecureField("Temporary username", text: relay.username)
+                            SecureField("Temporary password", text: relay.password)
+                            TextField("Expiry (Unix seconds)", text: relay.expiresAt).keyboardType(.numberPad)
+                            TextField("DTLS certificate SHA-256 (optional)", text: optional(relay.certificateSha256))
+                            Text("Without a certificate pin, the outer DTLS peer is unverified. WireGuard still verifies its peer.")
+                                .font(.footnote).foregroundStyle(.secondary)
+                        } else {
+                            Text("Complete authorization with a supported VK client, then provide temporary TURN credentials.")
+                                .font(.footnote).foregroundStyle(.secondary)
+                        }
                     }
                 }
                 if !validationMessage.isEmpty { Text(validationMessage).foregroundStyle(.red) }
