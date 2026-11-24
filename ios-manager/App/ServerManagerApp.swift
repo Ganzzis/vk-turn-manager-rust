@@ -164,6 +164,8 @@ private struct ServerDetail: View {
     @State private var profilePeer: Peer?
     @State private var sharedLink: SharedLink?
     @State private var journal: Journal?
+    @State private var diagnostics = DiagnosticLog()
+    @State private var diagnosticSheet: Journal?
     @State private var editor: Server?
 
     private var server: Server? { vault.servers.first { $0.id == id } }
@@ -177,12 +179,15 @@ private struct ServerDetail: View {
                     LabeledContent("Система", value: "\(status.system) · \(status.architecture)")
                     LabeledContent("Установка", value: installation(status.installation))
                     if status.installation == .managed {
-                        LabeledContent("Версия", value: status.version == "-" ? "CLI не установлен" : status.version)
+                        LabeledContent("Версия", value: managerVersion(status.version))
                     }
                     LabeledContent("WireGuard", value: service(status.wireguard))
                     LabeledContent("DTLS-SRTP", value: service(status.srtp))
                     LabeledContent("IPv4 NAT", value: service(status.nat))
                 } else { Text("Обновите состояние, чтобы проверить VPS.").foregroundStyle(.secondary) }
+                Button("Диагностика SSH", systemImage: "stethoscope") {
+                    diagnosticSheet = Journal(text: diagnostics.text())
+                }
                 if job != nil {
                     ProgressView(progress)
                     Button("Прервать", role: .cancel) { job?.cancel() }
@@ -284,6 +289,25 @@ private struct ServerDetail: View {
             }
         }
         .sheet(item: $sharedLink) { ImportCard(link: $0.value) }
+        .sheet(item: $diagnosticSheet) { report in
+            NavigationStack {
+                ScrollView {
+                    Text(report.text.isEmpty ? "Запустите обновление статуса, чтобы собрать диагностику." : report.text)
+                        .font(.footnote.monospaced()).textSelection(.enabled).padding()
+                }
+                .navigationTitle("Диагностика SSH")
+                .toolbar {
+                    ToolbarItem(placement: .cancellationAction) {
+                        Button("Готово") { diagnosticSheet = nil }
+                    }
+                    ToolbarItem(placement: .primaryAction) {
+                        Button("Копировать", systemImage: "document.on.document") {
+                            UIPasteboard.general.setItems([["public.utf8-plain-text": report.text]], options: [.localOnly: true])
+                        }.disabled(report.text.isEmpty)
+                    }
+                }
+            }
+        }
         .sheet(item: $journal) { journal in
             NavigationStack {
                 ScrollView { Text(journal.text).font(.footnote.monospaced()).textSelection(.enabled).padding() }
@@ -328,6 +352,7 @@ private struct ServerDetail: View {
         do {
             stored.hostKey = key.fingerprint
             try vault.save(stored, credentials: vault.credentials(id))
+            diagnostics.markHostConfirmed()
             refresh()
         } catch { dialog = .failure(message(error)) }
     }
@@ -342,10 +367,18 @@ private struct ServerDetail: View {
         progress = title
         job = Task { @MainActor in
             defer { job = nil }
-            do { try await operation(Manager(server: server, credentials: vault.credentials(id))) }
-            catch ManagerError.hostKeyRequired(let key) { dialog = .trust(key) }
-            catch is CancellationError { progress = ""; status = nil }
-            catch { dialog = .failure(message(error)) }
+            do {
+                try await operation(Manager(server: server, credentials: vault.credentials(id), diagnostics: diagnostics))
+                diagnostics.markCompletion()
+            } catch ManagerError.hostKeyRequired(let key) {
+                dialog = .trust(key)
+            } catch is CancellationError {
+                diagnostics.markCancellation()
+                progress = ""; status = nil
+            } catch {
+                diagnostics.markFailure(error)
+                dialog = .failure(message(error))
+            }
         }
     }
 
@@ -389,6 +422,14 @@ private struct ServerDetail: View {
 
     private func installation(_ value: Installation) -> String {
         switch value { case .absent: return "Не установлен"; case .managed: return "Управляемая"; case .foreign: return "Сторонняя или неполная" }
+    }
+
+    private func managerVersion(_ version: String) -> String {
+        switch version {
+        case "-": return "CLI не найден"
+        case "unknown": return "CLI найден, версия неизвестна"
+        default: return version
+        }
     }
 
     private func service(_ value: String) -> String {

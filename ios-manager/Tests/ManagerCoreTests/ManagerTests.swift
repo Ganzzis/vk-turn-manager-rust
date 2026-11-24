@@ -52,6 +52,37 @@ final class ManagerTests: XCTestCase {
         }
     }
 
+    func testCommandFrameIgnoresBannersAndRequiresACompleteExitMarker() throws {
+        let marker = "VK_RESULT_FIXTURE"
+        let valid = "startup banner\n" + "\nVK_RESULT_FIXTURE:BEGIN\nvalue\n\nVK_RESULT_FIXTURE:END:42\nlogout banner"
+        let reply = try CommandReply.parse(Data(valid.utf8), marker: marker)
+        XCTAssertEqual(reply.stdout, "value\n")
+        XCTAssertEqual(reply.exit, 42)
+        for (text, expected) in [
+            ("VK_RESULT_FIXTURE:END:0\n", FrameFault.missingStart),
+            ("\nVK_RESULT_FIXTURE:BEGIN\nvalue", .missingEnd),
+            ("\nVK_RESULT_FIXTURE:BEGIN\n\nVK_RESULT_FIXTURE:END:0", .missingEnd),
+            ("\nVK_RESULT_FIXTURE:BEGIN\n\nVK_RESULT_FIXTURE:END:999\n", .invalidExit)
+        ] {
+            XCTAssertThrowsError(try CommandReply.parse(Data(text.utf8), marker: marker)) {
+                XCTAssertEqual($0 as? FrameFault, expected)
+            }
+        }
+    }
+
+    func testDiagnosticsOnlyKeepAllowlistedInformation() {
+        let log = DiagnosticLog()
+        let secret = "synthetic-private-secret vkturnproxy://import?data=synthetic"
+        log.record(.stderr(.classify(Data(("sudo: " + secret).utf8))))
+        log.record(.invalidFrame(.missingEnd))
+        log.markFailure(ManagerError.hostKeyRequired(HostKey(fingerprint: secret)))
+        XCTAssertTrue(log.text().contains("sudo"))
+        XCTAssertTrue(log.text().contains("Нет маркера завершения"))
+        XCTAssertFalse(log.text().contains(secret))
+        for _ in 0..<125 { log.markCompletion() }
+        XCTAssertEqual(log.text().split(whereSeparator: \.isNewline).count, 100)
+    }
+
     func testDisposableUbuntuOverSSH() async throws {
         let env = ProcessInfo.processInfo.environment
         try XCTSkipUnless(env["VK_MANAGER_FIXTURE_PORT"] != nil, "Requires disposable Ubuntu fixture")
@@ -80,12 +111,63 @@ final class ManagerTests: XCTestCase {
         let passwordManager = Manager(server: server, credentials: credentials)
         let initial = try await passwordManager.status()
         XCTAssertEqual(initial.installation, .absent)
+        var root = server
+        root.user = "root"
+        root.hostKey = nil
+        let rootLog = DiagnosticLog()
+        do {
+            _ = try await Manager(server: root, credentials: credentials, diagnostics: rootLog).status()
+            XCTFail("Root authenticated without explicit pin")
+        } catch ManagerError.hostKeyRequired(let observed) {
+            XCTAssertEqual(observed.fingerprint, pin)
+            root.hostKey = observed.fingerprint
+        }
+        rootLog.markHostConfirmed()
+        let rootManager = Manager(server: root, credentials: credentials, diagnostics: rootLog)
+        let cleanAsRoot = try await rootManager.status()
+        XCTAssertEqual(cleanAsRoot.installation, .absent)
+        var badPassword = credentials
+        badPassword.password = "synthetic-incorrect-password"
+        do {
+            _ = try await Manager(server: root, credentials: badPassword, diagnostics: rootLog).status()
+            XCTFail("Root authenticated with an incorrect password")
+        } catch ManagerError.authentication {}
         let bundle = ServerBundle(directory: URL(fileURLWithPath: try XCTUnwrap(env["VK_MANAGER_FIXTURE_BUNDLE"])))
         try await passwordManager.install(bundle) { phase in print(phase) }
         let active = try await passwordManager.status()
         XCTAssertEqual(active.srtp, "active")
         XCTAssertEqual(active.wireguard, "active")
         XCTAssertEqual(active.nat, "active")
+
+        let rootSSH = try await SSH.open(root, credentials, diagnostics: rootLog)
+        defer { Task { await rootSSH.close() } }
+        let stream = try await rootSSH.command("printf '%s' matching-stdout; printf '%s' synthetic-stderr >&2")
+        XCTAssertEqual(stream, "matching-stdout")
+        do {
+            _ = try await rootSSH.command("printf '%s' 'fixture: invalid option synthetic-stderr' >&2; exit 34", privileged: true)
+            XCTFail("Nonzero exit was ignored")
+        } catch ManagerError.remote(34) {}
+        // An earlier server can be installed from a checkout without a system CLI.
+        _ = try await rootSSH.command("mv /usr/local/bin/vk-turn-manager /root/vk-turn-manager-fixture", privileged: true)
+        let legacy = try await rootManager.status()
+        XCTAssertEqual(legacy.installation, .managed)
+        XCTAssertEqual(legacy.version, "-")
+        XCTAssertEqual(legacy.wireguard, "active")
+        XCTAssertEqual(legacy.srtp, "active")
+        XCTAssertEqual(legacy.nat, "active")
+        _ = try await rootSSH.command("mv /root/vk-turn-manager-fixture /usr/bin/vk-turn-manager", privileged: true)
+        let distroPath = try await rootManager.status()
+        XCTAssertEqual(distroPath.version, "vk-turn-manager 0.3.0")
+        let distroPeers = try await rootManager.peers()
+        XCTAssertTrue(distroPeers.isEmpty)
+        _ = try await rootSSH.command("mv /usr/bin/vk-turn-manager /usr/local/bin/vk-turn-manager", privileged: true)
+        let diagnosticText = rootLog.text()
+        XCTAssertTrue(diagnosticText.contains("Авторизация SSH успешна"))
+        XCTAssertTrue(diagnosticText.contains("команда отклонила аргумент"))
+        XCTAssertTrue(diagnosticText.contains("системных каталогах"))
+        for secret in [credentials.password, badPassword.password, "synthetic-stderr", "synthetic shell banner", pin] {
+            XCTAssertFalse(diagnosticText.contains(secret), "Diagnostic log retained sensitive fixture data")
+        }
 
         var key = Credentials()
         key.method = .key

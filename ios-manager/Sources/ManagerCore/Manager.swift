@@ -4,14 +4,17 @@ import Crypto
 public struct Manager: Sendable {
     public let server: Server
     public let credentials: Credentials
+    private let diagnostics: DiagnosticLog
 
-    public init(server: Server, credentials: Credentials) {
+    public init(server: Server, credentials: Credentials, diagnostics: DiagnosticLog = DiagnosticLog()) {
         self.server = server
         self.credentials = credentials
+        self.diagnostics = diagnostics
     }
 
-    private func session<T>(_ work: (SSH) async throws -> T) async throws -> T {
-        let ssh = try await SSH.open(server, credentials)
+    private func session<T>(_ action: DiagnosticLog.Operation, _ work: (SSH) async throws -> T) async throws -> T {
+        diagnostics.record(.operation(action))
+        let ssh = try await SSH.open(server, credentials, diagnostics: diagnostics)
         do {
             let result = try await withTaskCancellationHandler {
                 try await work(ssh)
@@ -28,20 +31,45 @@ public struct Manager: Sendable {
         }
     }
 
-    private static let cli = "/usr/local/bin/vk-turn-manager"
-    private static let detect = """
+    // Only system-managed executable paths are eligible for privileged client operations.
+    // A manually installed server without a CLI at either path remains visible.
+    private static let findCLI = """
+    vk_manager=
+    for candidate in /usr/local/bin/vk-turn-manager /usr/bin/vk-turn-manager; do
+        if test -f "$candidate" && test -x "$candidate"; then
+            ownership=$(stat -Lc '%u %a' -- "$candidate") || continue
+            case "$ownership" in
+                '0 755'|'0 750'|'0 700'|'0 555'|'0 550'|'0 500')
+                    vk_manager=$candidate; break ;;
+            esac
+        fi
+    done
+    """
+    private static let requireCLI = findCLI + "\n" + """
+    if test -z "$vk_manager"; then printf '%s\\n' 'vk-turn-manager: command not found' >&2; exit 127; fi
+    """
+    private static let cli = "\"$vk_manager\""
+    static let detect = findCLI + "\n" + """
     . /etc/os-release
     printf '%s %s %s\\n' "$ID" "$VERSION_ID" "$(uname -m)"
     if test -f /etc/vk-turn-manager/wg-vk.conf &&
        printf 'vk-turn-manager installation\\n' | cmp -s - /etc/vk-turn-manager/managed; then
-        printf 'managed\\n'
-        if test -x /usr/local/bin/vk-turn-manager; then /usr/local/bin/vk-turn-manager --version; else printf '-\\n'; fi
+        installation=managed
     elif test -e /etc/vk-turn-manager || test -e /etc/wireguard/wg-vk.conf ||
          test -e /sys/class/net/wg-vk || test -e /etc/systemd/system/vk-turn-srtp.service; then
-        printf 'foreign\\n-\\n'
+        installation=foreign
     else
-        printf 'absent\\n-\\n'
+        installation=absent
     fi
+    version=-
+    if test "$installation" = managed && test -n "$vk_manager"; then
+        version=unknown
+        reported=$("$vk_manager" --version) || reported=
+        if [[ $reported =~ ^vk-turn-manager[[:space:]][0-9]+\\.[0-9]+\\.[0-9]+([-+][A-Za-z0-9.+-]+)?$ ]]; then
+            version=$reported
+        fi
+    fi
+    printf '%s\\n' "$installation" "$version"
     for unit in vk-turn-wireguard vk-turn-srtp vk-turn-network; do
         state=$(systemctl show --property=ActiveState --value "$unit.service" 2>/dev/null) || state=inactive
         printf '%s\\n' "${state:-inactive}"
@@ -49,11 +77,13 @@ public struct Manager: Sendable {
     """
 
     private func status(_ ssh: SSH) async throws -> ServerStatus {
-        let lines = try await ssh.command(Self.detect, privileged: true)
-            .split(whereSeparator: \.isNewline).map(String.init)
+        let output = try await ssh.command(Self.detect, privileged: true)
+        let lines = output.split(whereSeparator: \.isNewline).map(String.init)
         guard lines.count == 6, let installation = Installation(rawValue: lines[1]) else {
-            throw ManagerError.badReply
+            diagnostics.record(.invalidStatus(lines.count))
+            throw ManagerError.invalidStatus
         }
+        if installation == .managed && ["-", "unknown"].contains(lines[2]) { diagnostics.record(.legacyManager) }
         let platform = lines[0].split(separator: " ").map(String.init)
         guard platform.count == 3, platform[0] == "ubuntu", ["24.04", "26.04"].contains(platform[1])
         else { throw ManagerError.unsupported }
@@ -68,12 +98,12 @@ public struct Manager: Sendable {
                             wireguard: lines[3], srtp: lines[4], nat: lines[5])
     }
 
-    public func status() async throws -> ServerStatus { try await session { try await status($0) } }
+    public func status() async throws -> ServerStatus { try await session(.status) { try await status($0) } }
 
     public func install(_ bundle: ServerBundle, update: Bool = false,
                         progress: @Sendable (String) async -> Void) async throws {
         await progress("Подключение и проверка сервера")
-        try await session { ssh in
+        try await session(update ? .update : .install) { ssh in
             let current = try await status(ssh)
             guard current.installation == (update ? .managed : .absent) else {
                 throw ManagerError.notManaged
@@ -107,24 +137,24 @@ public struct Manager: Sendable {
     }
 
     public func peers() async throws -> [Peer] {
-        try await session { ssh in
-            let result = try await ssh.command(Self.cli + " client list", privileged: true)
+        try await session(.clients) { ssh in
+            let result = try await ssh.command(Self.requireCLI + "\n" + Self.cli + " client list", privileged: true)
             do { return try JSONDecoder().decode([Peer].self, from: Data(result.utf8)) }
-            catch { throw ManagerError.badReply }
+            catch { diagnostics.record(.invalidClients); throw ManagerError.badReply }
         }
     }
 
     public func changePeer(_ name: String, remove: Bool = false) async throws {
         try checkClient(name)
         let verb = remove ? "remove" : "add"
-        _ = try await session { try await $0.command("\(Self.cli) client \(verb) \(quote(name))", privileged: true) }
+        _ = try await session(remove ? .removeClient : .addClient) { try await $0.command(Self.requireCLI + "\n" + "\(Self.cli) client \(verb) \(quote(name))", privileged: true) }
     }
 
     public func profile(_ name: String, endpoint: String, invite: String) async throws -> String {
         try checkClient(name)
         try checkEndpoint(endpoint)
         try checkInvite(invite)
-        return try await session { ssh in
+        return try await session(.profile) { ssh in
             try await ssh.stage { staging in
                 try await ssh.upload([("invite", Data(invite.utf8))], to: staging)
                 let source = quote(staging + "/invite")
@@ -136,6 +166,7 @@ public struct Manager: Sendable {
                 trap 'exit 1' HUP TERM INT
                 install -m 0600 -- \(source) "$stage/invite"
                 printf '%s  %s\\n' \(quote(digest)) "$stage/invite" | sha256sum --check --status
+                \(Self.requireCLI)
                 \(Self.cli) client export \(quote(name)) --srtp-endpoint \(quote(endpoint)) --vk-link-file "$stage/invite" --output "$stage/profile" >/dev/null
                 cat "$stage/profile"
                 """, privileged: true).trimmingCharacters(in: .whitespacesAndNewlines)
@@ -151,7 +182,7 @@ public struct Manager: Sendable {
     }
 
     public func connections() async throws -> [Connection] {
-        let output = try await session { ssh in
+        let output = try await session(.connections) { ssh in
             try await ssh.command("""
             set -e
             for field in endpoints latest-handshakes transfer; do
@@ -188,19 +219,19 @@ public struct Manager: Sendable {
     }
 
     public func logs() async throws -> String {
-        try await session { try await $0.command("journalctl --no-pager -n 100 -u vk-turn-wireguard.service -u vk-turn-srtp.service -u vk-turn-network.service", privileged: true) }
+        try await session(.logs) { try await $0.command("journalctl --no-pager -n 100 -u vk-turn-wireguard.service -u vk-turn-srtp.service -u vk-turn-network.service", privileged: true) }
     }
 
     public func changeService(_ action: ServiceAction) async throws {
-        try await session { ssh in
+        try await session(.service) { ssh in
             guard try await status(ssh).installation == .managed else { throw ManagerError.notManaged }
             let command: String
             switch action {
             case .start: command = "systemctl start vk-turn-srtp.service"
             case .stop: command = "systemctl stop vk-turn-srtp.service vk-turn-wireguard.service"
             case .restart: command = "systemctl restart vk-turn-wireguard.service vk-turn-srtp.service"
-            case .enableNAT: command = Self.cli + " network enable"
-            case .remove: command = Self.cli + " uninstall"
+            case .enableNAT: command = Self.requireCLI + "\n" + Self.cli + " network enable"
+            case .remove: command = Self.requireCLI + "\n" + Self.cli + " uninstall"
             }
             _ = try await ssh.command(command, privileged: true, seconds: 150)
         }

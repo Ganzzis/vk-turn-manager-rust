@@ -34,12 +34,15 @@ private final class PinnedHost: NIOSSHClientServerAuthenticationDelegate, @unche
 final class SSH: @unchecked Sendable {
     private let client: SSHClient
     private let password: String?
-    private init(_ client: SSHClient, password: String?) {
+    private let diagnostics: DiagnosticLog
+    private init(_ client: SSHClient, password: String?, diagnostics: DiagnosticLog) {
         self.client = client
         self.password = password
+        self.diagnostics = diagnostics
     }
 
-    static func open(_ server: Server, _ credentials: Credentials) async throws -> SSH {
+    static func open(_ server: Server, _ credentials: Credentials, diagnostics: DiagnosticLog = DiagnosticLog()) async throws -> SSH {
+        diagnostics.record(.connect(credentials.method))
         try server.validate()
         try credentials.validate()
         let authentication: @Sendable () -> SSHAuthenticationMethod
@@ -60,13 +63,23 @@ final class SSH: @unchecked Sendable {
         settings.connectTimeout = .seconds(12)
         do {
             let client = try await SSHClient.connect(to: settings)
-            return SSH(client, password: server.user == "root" ? nil : credentials.elevationPassword)
+            diagnostics.record(.authenticated)
+            return SSH(client, password: server.user == "root" ? nil : credentials.elevationPassword, diagnostics: diagnostics)
         } catch {
             if Task.isCancelled { throw CancellationError() }
             if let observed = validator.fingerprint {
-                if server.hostKey == nil { throw ManagerError.hostKeyRequired(HostKey(fingerprint: observed)) }
-                if observed != server.hostKey { throw ManagerError.hostKeyChanged }
+                if server.hostKey == nil {
+                    diagnostics.record(.hostUnconfirmed)
+                    throw ManagerError.hostKeyRequired(HostKey(fingerprint: observed))
+                }
+                if observed != server.hostKey {
+                    diagnostics.record(.hostChanged)
+                    throw ManagerError.hostKeyChanged
+                }
+                diagnostics.record(.authenticationFailed)
+                throw ManagerError.authentication
             }
+            diagnostics.record(.connectFailed)
             throw ManagerError.ssh
         }
     }
@@ -75,41 +88,70 @@ final class SSH: @unchecked Sendable {
 
     func command(_ body: String, privileged: Bool = false, seconds: Int = 30) async throws -> String {
         let marker = "VK_RESULT_" + UUID().uuidString
+        let bash = "/usr/bin/env -u BASH_ENV /bin/bash --noprofile --norc -c"
         let privilege: String
         if privileged {
             let sudo = password == nil ? "sudo -n --" : "sudo -k -S -p '' --"
-            let script = quote("exec </dev/null; printf 'VK_PRIVILEGED\\n'; " + body)
-            privilege = "if [ \"$(id -u)\" -eq 0 ]; then /bin/bash -c \(script); else \(sudo) /bin/bash -c \(script); fi"
+            let rootScript = quote("exec </dev/null; printf 'VK_PRIVILEGED_ROOT\\n'; " + body)
+            let sudoScript = quote("exec </dev/null; printf 'VK_PRIVILEGED_SUDO\\n'; " + body)
+            privilege = "if [ \"$(id -u)\" -eq 0 ]; then \(bash) \(rootScript); else \(sudo) \(bash) \(sudoScript); fi"
         } else {
-            privilege = "/bin/bash -c \(quote(body))"
+            privilege = "\(bash) \(quote(body))"
         }
-        let full = "umask 077; \(privilege); code=$?; printf '\\n\(marker):%s\\n' \"$code\""
+        let frame = "umask 077; printf '\\n\(marker):BEGIN\\n'; \(privilege); code=$?; printf '\\n\(marker):END:%s\\n' \"$code\""
+        // Use Bash even when the account's login shell only forwards the command.
+        let full = "\(bash) \(quote(frame))"
+        diagnostics.record(.command)
         return try await deadline(seconds) {
             var output = Data()
+            var errors = Data()
+            defer {
+                self.diagnostics.record(.streams(output.count, errors.count))
+                if !errors.isEmpty { self.diagnostics.record(.stderr(.classify(errors))) }
+            }
             do {
                 try await self.client.withExec(full) { inbound, outbound in
                     if privileged, let password = self.password {
                         try await outbound.write(ByteBuffer(string: password + "\n"))
                     }
                     for try await part in inbound {
-                        if case .stdout(let buffer) = part {
-                            guard output.count + buffer.readableBytes <= 512 * 1024 else { throw ManagerError.badReply }
+                        switch part {
+                        case .stdout(let buffer):
+                            guard output.count + buffer.readableBytes <= 512 * 1024 else { throw FrameFault.outputLimit }
                             output.append(contentsOf: buffer.readableBytesView)
+                        case .stderr(let buffer):
+                            errors.append(contentsOf: buffer.readableBytesView.prefix(max(0, 8192 - errors.count)))
                         }
                     }
                 }
             } catch let error as ChannelError where error == .alreadyClosed {
-                // OpenSSH may close the child channel before Citadel closes it.
-                // A complete, matching exit marker is still required below.
+                // A complete frame is still required if OpenSSH closes first.
+            } catch let fault as FrameFault {
+                self.diagnostics.record(.invalidFrame(fault))
+                throw ManagerError.badReply
+            } catch {
+                self.diagnostics.record(.protocolFailed)
+                throw error
             }
-            let response = String(decoding: output, as: UTF8.self)
-            guard let separator = response.range(of: "\n\(marker):", options: .backwards),
-                  let code = Int(response[separator.upperBound...].trimmingCharacters(in: .whitespacesAndNewlines))
-            else { throw ManagerError.badReply }
-            var result = String(response[..<separator.lowerBound])
-            if result.hasPrefix("VK_PRIVILEGED\n") { result.removeFirst("VK_PRIVILEGED\n".count) }
-            else if privileged && code == 1 { throw ManagerError.sudo }
-            if code != 0 { throw ManagerError.remote(code) }
+            let reply: CommandReply
+            do { reply = try CommandReply.parse(output, marker: marker) }
+            catch let fault as FrameFault {
+                self.diagnostics.record(.invalidFrame(fault))
+                throw ManagerError.badReply
+            }
+            self.diagnostics.record(.exit(reply.exit))
+            var result = reply.stdout
+            if privileged {
+                let root = result.hasPrefix("VK_PRIVILEGED_ROOT\n")
+                let prefix = root ? "VK_PRIVILEGED_ROOT\n" : "VK_PRIVILEGED_SUDO\n"
+                guard result.hasPrefix(prefix) else {
+                    self.diagnostics.record(.privilegeFailed)
+                    throw ManagerError.sudo
+                }
+                self.diagnostics.record(.privileges(root))
+                result.removeFirst(prefix.count)
+            }
+            if reply.exit != 0 { throw ManagerError.remote(reply.exit) }
             return result
         }
     }
@@ -119,6 +161,7 @@ final class SSH: @unchecked Sendable {
             group.addTask(operation: work)
             group.addTask {
                 try await Task.sleep(for: .seconds(seconds))
+                self.diagnostics.record(.timeout)
                 await self.close()
                 throw ManagerError.timeout
             }
@@ -157,6 +200,7 @@ final class SSH: @unchecked Sendable {
                 try await sftp.close()
             } catch {
                 try? await sftp.close()
+                self.diagnostics.record(.sftpFailed)
                 throw error
             }
         }

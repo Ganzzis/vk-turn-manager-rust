@@ -62,7 +62,7 @@ public struct HostKey: Identifiable, Equatable, Sendable {
 
 public enum ManagerError: LocalizedError, Equatable {
     case invalidServer, invalidCredentials, badPrivateKey, hostKeyRequired(HostKey), hostKeyChanged
-    case ssh, sudo, timeout, unsupported, badReply, bundle, notManaged, invalidClient, invalidInvite
+    case ssh, authentication, sudo, timeout, unsupported, badReply, invalidStatus, bundle, notManaged, invalidClient, invalidInvite
     case remote(Int), privateStorage
     public var errorDescription: String? {
         switch self {
@@ -72,6 +72,8 @@ public enum ManagerError: LocalizedError, Equatable {
         case .hostKeyRequired: return "Сверьте отпечаток SSH с консолью провайдера."
         case .hostKeyChanged: return "Ключ SSH изменился. Операция остановлена. Сверьте новый ключ через консоль провайдера."
         case .ssh: return "Ошибка SSH. Проверьте адрес, порт, доступ и разрешённый способ входа."
+        case .authentication: return "SSH-ключ проверен, но вход не завершился. Проверьте логин, пароль или ключ и разрешённый способ входа."
+        case .invalidStatus: return "SSH работает, но проверка служб вернула неполный ответ. Откройте диагностику SSH."
         case .sudo: return "Сервер требует root или sudo. Проверьте права и пароль sudo."
         case .timeout: return "Сервер не ответил вовремя. Проверьте состояние установки перед повтором."
         case .unsupported: return "Нужна Ubuntu 24.04 или 26.04 на amd64 или arm64."

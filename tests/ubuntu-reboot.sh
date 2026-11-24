@@ -94,8 +94,8 @@ if [[ -n ${VK_MANAGER_FIXTURE_BUNDLE:-} ]]; then
   {
     printf 'password=%s\n' "$password"
     cat <<'FIXTURE'
-printf "ubuntu:%s\n" "$password" | chpasswd
-printf 'PasswordAuthentication yes\nHostKey /etc/ssh/ssh_host_ed25519_key\n' > /etc/ssh/sshd_config.d/00-vk-ci.conf
+printf "ubuntu:%s\nroot:%s\n" "$password" "$password" | chpasswd
+printf 'PasswordAuthentication yes\nPermitRootLogin yes\nHostKey /etc/ssh/ssh_host_ed25519_key\n' > /etc/ssh/sshd_config.d/00-vk-ci.conf
 systemctl reload ssh
 printf 'ubuntu ALL=(ALL) ALL\n' > /etc/sudoers.d/91-vk-ci
 chmod 0440 /etc/sudoers.d/91-vk-ci
