@@ -130,16 +130,8 @@ jobs:
             mkdir -p VKServerManager.xcodeproj/project.xcworkspace/xcshareddata/swiftpm
             cp Package.resolved VKServerManager.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved
           }
-          device=$(xcrun simctl list devices available --json | python3 -c '
-          import json, sys
-          devices = json.load(sys.stdin)["devices"]
-          print(next(device["udid"] for runtime, entries in devices.items()
-                     if ".iOS-26-" in runtime for device in entries if device["name"].startswith("iPhone")))
-          ')
-          xcodebuild test -project VKServerManager.xcodeproj -scheme VKServerManager \
-            -destination "platform=iOS Simulator,id=$device" -derivedDataPath build/simulator \
-            -parallel-testing-enabled NO CODE_SIGNING_ALLOWED=NO
           xcodebuild archive -project VKServerManager.xcodeproj -scheme VKServerManager \
+            -clonedSourcePackagesDirPath build/SourcePackages \
             -destination 'generic/platform=iOS' -archivePath build/VKServerManager.xcarchive CODE_SIGNING_ALLOWED=NO
       - name: Package unsigned IPA and Xcode archive
         working-directory: ios-manager
@@ -166,3 +158,17 @@ jobs:
           path: ios-manager/build/distribution/
           if-no-files-found: error
           retention-days: 30
+      - name: Test server profiles and Keychain on iOS Simulator
+        working-directory: ios-manager
+        run: |
+          set -euo pipefail
+          device=$(xcrun simctl list devices available --json | python3 -c '
+          import json, sys
+          devices = json.load(sys.stdin)["devices"]
+          print(next(device["udid"] for runtime, entries in devices.items()
+                     if ".iOS-26-" in runtime for device in entries if device["name"].startswith("iPhone")))
+          ')
+          xcodebuild test -project VKServerManager.xcodeproj -scheme VKServerManager \
+            -destination "platform=iOS Simulator,id=$device" -derivedDataPath build/simulator \
+            -clonedSourcePackagesDirPath build/SourcePackages \
+            -parallel-testing-enabled NO CODE_SIGNING_IDENTITY=-

@@ -33,6 +33,7 @@ private struct ServerList: View {
                             }
                         } icon: { Image(systemName: "server.rack").foregroundStyle(.tint) }
                     }
+                    .accessibilityIdentifier("server-\(server.host)")
                     .swipeActions {
                         Button("Забыть VPS", role: .destructive) {
                             do { try vault.remove(server.id) }
@@ -115,7 +116,7 @@ private struct ServerEditor: View {
                         Toggle("Запросить повторную проверку ключа", isOn: $resetPin)
                     }
                 }
-                if !error.isEmpty { Text(error).foregroundStyle(.red) }
+                if !error.isEmpty { Text(error).foregroundStyle(.red).accessibilityIdentifier("save-error") }
             }
             .navigationTitle("Доступ к VPS")
             .toolbar {

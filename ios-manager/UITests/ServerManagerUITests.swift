@@ -4,6 +4,10 @@ final class ServerManagerUITests: XCTestCase {
     func testSavesMultipleServers() {
         let app = XCUIApplication()
         app.launch()
+        continueAfterFailure = false
+        func row(_ host: String) -> XCUIElement {
+            app.descendants(matching: .any)["server-" + host].firstMatch
+        }
         let first = "Fixture " + UUID().uuidString.prefix(6)
         let second = "Fixture " + UUID().uuidString.prefix(6)
         for (name, host) in [(first, "192.0.2.10"), (second, "192.0.2.11")] {
@@ -20,11 +24,13 @@ final class ServerManagerUITests: XCTestCase {
             password.tap()
             password.typeText("synthetic-password")
             app.buttons["Сохранить"].tap()
-            XCTAssertTrue(app.staticTexts[name].waitForExistence(timeout: 5))
+            let error = app.staticTexts["save-error"]
+            XCTAssertTrue(row(host).waitForExistence(timeout: 8),
+                          error.exists ? error.label : "The server row did not appear after saving.")
         }
         app.terminate()
         app.launch()
-        XCTAssertTrue(app.staticTexts[first].waitForExistence(timeout: 5))
-        XCTAssertTrue(app.staticTexts[second].exists)
+        XCTAssertTrue(row("192.0.2.10").waitForExistence(timeout: 8))
+        XCTAssertTrue(row("192.0.2.11").exists)
     }
 }
