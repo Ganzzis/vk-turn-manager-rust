@@ -425,6 +425,10 @@ fn main() -> ExitCode {
             network::disable()
         }
         [command, rest @ ..] if command == "client" => client::command(rest),
+        [command] if command == "--version" || command == "-V" => {
+            println!("vk-turn-manager {}", env!("CARGO_PKG_VERSION"));
+            return ExitCode::SUCCESS;
+        }
         [command] if command == "--help" || command == "-h" => {
             usage();
             return ExitCode::SUCCESS;
@@ -444,7 +448,7 @@ fn main() -> ExitCode {
 }
 
 fn usage() {
-    eprintln!("Usage:\n  vk-turn-manager install <wg-config-file>\n  vk-turn-manager status\n  vk-turn-manager uninstall\n  vk-turn-manager network status\n  vk-turn-manager network plan\n  vk-turn-manager network enable\n  vk-turn-manager network disable\n  vk-turn-manager client add NAME\n  vk-turn-manager client list\n  vk-turn-manager client remove NAME\n  vk-turn-manager client export NAME --wg-endpoint HOST:PORT --output FILE\n  vk-turn-manager client export NAME --srtp-endpoint HOST:PORT --vk-link-file FILE --output FILE");
+    eprintln!("Usage:\n  vk-turn-manager --version\n  vk-turn-manager install <wg-config-file>\n  vk-turn-manager status\n  vk-turn-manager uninstall\n  vk-turn-manager network status\n  vk-turn-manager network plan\n  vk-turn-manager network enable\n  vk-turn-manager network disable\n  vk-turn-manager client add NAME\n  vk-turn-manager client list\n  vk-turn-manager client remove NAME\n  vk-turn-manager client export NAME --wg-endpoint HOST:PORT --output FILE\n  vk-turn-manager client export NAME --srtp-endpoint HOST:PORT --vk-link-file FILE --output FILE");
 }
 
 #[cfg(test)]
