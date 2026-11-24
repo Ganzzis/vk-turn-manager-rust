@@ -89,6 +89,7 @@ before=$(wait_for_boot)
 remote "cloud-init status --wait && grep -x 'VERSION_ID=\"$version\"' /etc/os-release"
 if [[ -n ${VK_MANAGER_FIXTURE_BUNDLE:-} ]]; then
   # Only the ephemeral localhost VM uses these synthetic login credentials.
+  scp "${ssh_opts[@]}" -P "$port" "$root/tests/network-dataplane.sh" ubuntu@127.0.0.1:~/network-dataplane.sh
   password=$(openssl rand -hex 24)
   {
     printf 'password=%s\n' "$password"

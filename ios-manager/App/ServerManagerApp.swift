@@ -191,8 +191,11 @@ private struct ServerDetail: View {
             }
             if status?.installation == .absent {
                 Section {
-                    Button("Установить", systemImage: "arrow.down.circle.fill") { deploy(update: false) }
-                        .buttonStyle(.borderedProminent)
+                    if #available(iOS 26.0, *) {
+                        installButton.buttonStyle(.glassProminent)
+                    } else {
+                        installButton.buttonStyle(.borderedProminent)
+                    }
                 } footer: { Text("Установит WireGuard, SRTP и IPv4 NAT. Входящий UDP 56004 должен быть разрешён в настройках VPS.") }
             }
             if managed {
@@ -326,6 +329,11 @@ private struct ServerDetail: View {
             try vault.save(stored, credentials: vault.credentials(id))
             refresh()
         } catch { dialog = .failure(message(error)) }
+    }
+
+    private var installButton: some View {
+        Button("Установить", systemImage: "arrow.down.circle.fill") { deploy(update: false) }
+            .disabled(job != nil)
     }
 
     private func run(_ title: String, operation: @escaping @MainActor (Manager) async throws -> Void) {

@@ -103,8 +103,25 @@ final class ManagerTests: XCTestCase {
         XCTAssertEqual(payload["version"] as? Int, 1)
         XCTAssertEqual(settings["useSrtp"] as? Bool, true)
         XCTAssertEqual(settings["vkLink"] as? String, args.2)
+        let fixture = try await SSH.open(server, key)
+        do {
+            _ = try await fixture.command("""
+            set -e
+            stage=$(mktemp -d)
+            trap 'rm -rf -- "$stage"' EXIT
+            /usr/local/bin/vk-turn-manager client export phone --wg-endpoint 192.0.2.1:51820 --output "$stage/client.conf" >/dev/null
+            WG_CLIENT_CONF="$stage/client.conf" bash /home/ubuntu/network-dataplane.sh
+            """, privileged: true)
+            await fixture.close()
+        } catch {
+            await fixture.close()
+            throw error
+        }
         let connections = try await manager.connections()
         XCTAssertEqual(connections.first?.publicKey, peers.first?.publicKey)
+        XCTAssertNotNil(connections.first?.handshake)
+        XCTAssertGreaterThan(connections.first?.received ?? 0, 0)
+        XCTAssertGreaterThan(connections.first?.sent ?? 0, 0)
         try await manager.install(bundle, update: true) { _ in }
         let retained = try await manager.profile(args.0, endpoint: args.1, invite: args.2)
         XCTAssertTrue(retained == profile, "The profile changed across update")
@@ -115,6 +132,7 @@ final class ManagerTests: XCTestCase {
         try await manager.changeService(.restart)
         let journal = try await manager.logs()
         XCTAssertFalse(journal.contains(args.2))
+        XCTAssertFalse(journal.contains(credentials.password))
         try await manager.changePeer("phone", remove: true)
         let remaining = try await manager.peers()
         XCTAssertTrue(remaining.isEmpty)

@@ -7,7 +7,7 @@ let package = Package(
     products: [.library(name: "ManagerCore", targets: ["ManagerCore"])],
     dependencies: [
         .package(url: "https://github.com/orlandos-nl/Citadel", exact: "0.12.1"),
-        .package(url: "https://github.com/Wellz26/swift-nio-ssh.git", exact: "0.3.4"),
+        .package(url: "https://github.com/Wellz26/swift-nio-ssh.git", exact: "0.3.7"),
         .package(url: "https://github.com/apple/swift-nio.git", from: "2.81.0"),
         .package(url: "https://github.com/apple/swift-crypto.git", from: "3.12.3")
     ],

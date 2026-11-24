@@ -2,10 +2,10 @@ name: iOS Server Manager
 
 on:
   pull_request:
-    paths: ['ios-manager/**', 'src/**', 'units/**', 'Cargo.*', 'install.sh', 'scripts/package-server-release.sh', 'tests/ubuntu-reboot.sh', '.github/workflows/ios-server-manager.yml']
+    paths: ['ios-manager/**', 'src/**', 'units/**', 'Cargo.*', 'install.sh', 'scripts/package-server-release.sh', 'tests/ubuntu-reboot.sh', 'tests/network-dataplane.sh', '.github/workflows/ios-server-manager.yml']
   push:
     branches: [main]
-    paths: ['ios-manager/**', 'src/**', 'units/**', 'Cargo.*', 'install.sh', 'scripts/package-server-release.sh', 'tests/ubuntu-reboot.sh', '.github/workflows/ios-server-manager.yml']
+    paths: ['ios-manager/**', 'src/**', 'units/**', 'Cargo.*', 'install.sh', 'scripts/package-server-release.sh', 'tests/ubuntu-reboot.sh', 'tests/network-dataplane.sh', '.github/workflows/ios-server-manager.yml']
   workflow_dispatch:
 
 permissions:
@@ -51,6 +51,10 @@ jobs:
 
   test-ssh:
     needs: server-assets
+    strategy:
+      fail-fast: false
+      matrix:
+        ubuntu: ['24.04', '26.04']
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
@@ -60,6 +64,8 @@ jobs:
           name: server-manager-assets-amd64
           path: bundle
       - name: Prepare disposable Ubuntu and verify end-to-end SSH workflow
+        env:
+          UBUNTU_VERSION: ${{ matrix.ubuntu }}
         run: |
           set -euo pipefail
           sudo apt-get update
@@ -68,7 +74,7 @@ jobs:
           swift test --package-path ios-manager --skip testDisposableUbuntuOverSSH
           (cd bundle && sha256sum install.sh server-linux-amd64 *.tar.gz > SHA256SUMS)
           cargo build --release --locked
-          VK_MANAGER_FIXTURE_BUNDLE="$PWD/bundle" bash tests/ubuntu-reboot.sh target/release/vk-turn-manager 24.04
+          VK_MANAGER_FIXTURE_BUNDLE="$PWD/bundle" bash tests/ubuntu-reboot.sh target/release/vk-turn-manager "$UBUNTU_VERSION"
 
   ipa:
     needs: server-assets
@@ -124,8 +130,15 @@ jobs:
             mkdir -p VKServerManager.xcodeproj/project.xcworkspace/xcshareddata/swiftpm
             cp Package.resolved VKServerManager.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved
           }
-          xcodebuild build -project VKServerManager.xcodeproj -scheme VKServerManager \
-            -destination 'generic/platform=iOS Simulator' -derivedDataPath build/simulator CODE_SIGNING_ALLOWED=NO
+          device=$(xcrun simctl list devices available --json | python3 -c '
+          import json, sys
+          devices = json.load(sys.stdin)["devices"]
+          print(next(device["udid"] for runtime, entries in devices.items()
+                     if ".iOS-26-" in runtime for device in entries if device["name"].startswith("iPhone")))
+          ')
+          xcodebuild test -project VKServerManager.xcodeproj -scheme VKServerManager \
+            -destination "platform=iOS Simulator,id=$device" -derivedDataPath build/simulator \
+            -parallel-testing-enabled NO CODE_SIGNING_ALLOWED=NO
           xcodebuild archive -project VKServerManager.xcodeproj -scheme VKServerManager \
             -destination 'generic/platform=iOS' -archivePath build/VKServerManager.xcarchive CODE_SIGNING_ALLOWED=NO
       - name: Package unsigned IPA and Xcode archive

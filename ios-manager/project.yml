@@ -32,10 +32,25 @@ targets:
         CFBundleDevelopmentRegion: ru
         UILaunchScreen: {}
         NSLocalNetworkUsageDescription: Подключение к серверу по SSH в локальной сети.
+  VKServerManagerUITests:
+    type: bundle.ui-testing
+    platform: iOS
+    sources:
+      - UITests
+    dependencies:
+      - target: VKServerManager
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: org.ganzzis.vkturn.server-manager.uitests
+        GENERATE_INFOPLIST_FILE: YES
+        TEST_TARGET_NAME: VKServerManager
 schemes:
   VKServerManager:
     build:
       targets:
         VKServerManager: all
+        VKServerManagerUITests: [test]
+    test:
+      targets: [VKServerManagerUITests]
     archive:
       config: Release
