@@ -34,7 +34,7 @@ private struct ServerList: View {
                         } icon: { Image(systemName: "server.rack").foregroundStyle(.tint) }
                     }
                     .swipeActions {
-                        Button("Удалить", role: .destructive) {
+                        Button("Забыть VPS", role: .destructive) {
                             do { try vault.remove(server.id) }
                             catch { self.error = message(error) }
                         }
@@ -273,7 +273,7 @@ private struct ServerDetail: View {
         .task { if status == nil { refresh() } }
         .refreshable { if job == nil { refresh(); await job?.value } }
         .onDisappear { job?.cancel() }
-        .sheet(item: $editor, onDismiss: { refresh() }) { ServerEditor(server: $0) }
+        .sheet(item: $editor, onDismiss: { status = nil; refresh() }) { ServerEditor(server: $0) }
         .sheet(item: $profilePeer) { peer in
             ExportSheet(peer: peer, endpoint: server?.defaultEndpoint ?? "") { endpoint, invite in
                 profilePeer = nil

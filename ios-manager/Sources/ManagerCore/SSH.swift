@@ -84,9 +84,9 @@ final class SSH: @unchecked Sendable {
             privilege = "/bin/bash -c \(quote(body))"
         }
         let full = "umask 077; \(privilege); code=$?; printf '\\n\(marker):%s\\n' \"$code\""
-        return try await withThrowingTaskGroup(of: String.self) { group in
-            group.addTask {
-                var output = Data()
+        return try await deadline(seconds) {
+            var output = Data()
+            do {
                 try await self.client.withExec(full) { inbound, outbound in
                     if privileged, let password = self.password {
                         try await outbound.write(ByteBuffer(string: password + "\n"))
@@ -98,24 +98,33 @@ final class SSH: @unchecked Sendable {
                         }
                     }
                 }
-                let response = String(decoding: output, as: UTF8.self)
-                guard let separator = response.range(of: "\n\(marker):", options: .backwards),
-                      let code = Int(response[separator.upperBound...].trimmingCharacters(in: .whitespacesAndNewlines))
-                else { throw ManagerError.badReply }
-                var result = String(response[..<separator.lowerBound])
-                if result.hasPrefix("VK_PRIVILEGED\n") { result.removeFirst("VK_PRIVILEGED\n".count) }
-                else if privileged && code == 1 { throw ManagerError.sudo }
-                if code != 0 { throw ManagerError.remote(code) }
-                return result
+            } catch let error as ChannelError where error == .alreadyClosed {
+                // OpenSSH may close the child channel before Citadel closes it.
+                // A complete, matching exit marker is still required below.
             }
+            let response = String(decoding: output, as: UTF8.self)
+            guard let separator = response.range(of: "\n\(marker):", options: .backwards),
+                  let code = Int(response[separator.upperBound...].trimmingCharacters(in: .whitespacesAndNewlines))
+            else { throw ManagerError.badReply }
+            var result = String(response[..<separator.lowerBound])
+            if result.hasPrefix("VK_PRIVILEGED\n") { result.removeFirst("VK_PRIVILEGED\n".count) }
+            else if privileged && code == 1 { throw ManagerError.sudo }
+            if code != 0 { throw ManagerError.remote(code) }
+            return result
+        }
+    }
+
+    private func deadline<T: Sendable>(_ seconds: Int, work: @escaping @Sendable () async throws -> T) async throws -> T {
+        try await withThrowingTaskGroup(of: T.self) { group in
+            group.addTask(operation: work)
             group.addTask {
                 try await Task.sleep(for: .seconds(seconds))
                 await self.close()
                 throw ManagerError.timeout
             }
             defer { group.cancelAll() }
-            guard let reply = try await group.next() else { throw ManagerError.badReply }
-            return reply
+            guard let result = try await group.next() else { throw ManagerError.badReply }
+            return result
         }
     }
 
@@ -135,19 +144,21 @@ final class SSH: @unchecked Sendable {
     }
 
     func upload(_ files: [(String, Data)], to directory: String) async throws {
-        let sftp = try await client.openSFTP()
-        do {
-            for (name, data) in files {
-                try Task.checkCancellation()
-                try await sftp.withFile(filePath: directory + "/" + name,
-                                        flags: [.write, .create, .forceCreate]) { file in
-                    try await file.write(ByteBuffer(bytes: data))
+        try await deadline(180) {
+            let sftp = try await self.client.openSFTP()
+            do {
+                for (name, data) in files {
+                    try Task.checkCancellation()
+                    try await sftp.withFile(filePath: directory + "/" + name,
+                                            flags: [.write, .create, .forceCreate]) { file in
+                        try await file.write(ByteBuffer(bytes: data))
+                    }
                 }
+                try await sftp.close()
+            } catch {
+                try? await sftp.close()
+                throw error
             }
-            try await sftp.close()
-        } catch {
-            try? await sftp.close()
-            throw error
         }
     }
 }

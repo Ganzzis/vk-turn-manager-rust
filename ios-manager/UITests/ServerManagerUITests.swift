@@ -16,6 +16,7 @@ final class ServerManagerUITests: XCTestCase {
             hostField.tap()
             hostField.typeText(host)
             let password = app.secureTextFields["Пароль SSH"]
+            if !password.isHittable { app.swipeUp() }
             password.tap()
             password.typeText("synthetic-password")
             app.buttons["Сохранить"].tap()

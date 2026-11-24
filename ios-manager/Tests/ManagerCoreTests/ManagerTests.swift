@@ -63,6 +63,7 @@ final class ManagerTests: XCTestCase {
         var credentials = Credentials()
         credentials.password = try XCTUnwrap(env["VK_MANAGER_FIXTURE_PASSWORD"])
         let pin = try XCTUnwrap(env["VK_MANAGER_FIXTURE_PIN"])
+        print("Checking host key rejection")
         do {
             _ = try await Manager(server: server, credentials: credentials).status()
             XCTFail("Host authenticated without explicit pin")
@@ -75,11 +76,12 @@ final class ManagerTests: XCTestCase {
             XCTFail("Changed host key accepted")
         } catch ManagerError.hostKeyChanged {}
         server.hostKey = pin
+        print("Checking password login and sudo")
         let passwordManager = Manager(server: server, credentials: credentials)
         let initial = try await passwordManager.status()
         XCTAssertEqual(initial.installation, .absent)
         let bundle = ServerBundle(directory: URL(fileURLWithPath: try XCTUnwrap(env["VK_MANAGER_FIXTURE_BUNDLE"])))
-        try await passwordManager.install(bundle) { _ in }
+        try await passwordManager.install(bundle) { phase in print(phase) }
         let active = try await passwordManager.status()
         XCTAssertEqual(active.srtp, "active")
         XCTAssertEqual(active.wireguard, "active")
@@ -90,6 +92,7 @@ final class ManagerTests: XCTestCase {
         key.privateKey = try String(contentsOfFile: XCTUnwrap(env["VK_MANAGER_FIXTURE_KEY"]), encoding: .utf8)
         key.sudoPassword = credentials.password
         let manager = Manager(server: server, credentials: key)
+        print("Checking OpenSSH key login and client export")
         try await manager.changePeer("phone")
         let peers = try await manager.peers()
         XCTAssertEqual(peers.map(\.name), ["phone"])
@@ -103,6 +106,7 @@ final class ManagerTests: XCTestCase {
         XCTAssertEqual(payload["version"] as? Int, 1)
         XCTAssertEqual(settings["useSrtp"] as? Bool, true)
         XCTAssertEqual(settings["vkLink"] as? String, args.2)
+        print("Checking real WireGuard handshake and byte counters")
         let fixture = try await SSH.open(server, key)
         do {
             _ = try await fixture.command("""
@@ -122,7 +126,7 @@ final class ManagerTests: XCTestCase {
         XCTAssertNotNil(connections.first?.handshake)
         XCTAssertGreaterThan(connections.first?.received ?? 0, 0)
         XCTAssertGreaterThan(connections.first?.sent ?? 0, 0)
-        try await manager.install(bundle, update: true) { _ in }
+        try await manager.install(bundle, update: true) { phase in print(phase) }
         let retained = try await manager.profile(args.0, endpoint: args.1, invite: args.2)
         XCTAssertTrue(retained == profile, "The profile changed across update")
         try await manager.changeService(.stop)

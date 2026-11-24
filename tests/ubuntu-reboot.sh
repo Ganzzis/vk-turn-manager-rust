@@ -103,8 +103,11 @@ rm -f /etc/sudoers.d/90-cloud-init-users
 FIXTURE
   } | remote 'sudo -n /bin/bash -se'
   pin=$(remote 'cat /etc/ssh/ssh_host_ed25519_key.pub' | ssh-keygen -lf - | awk 'NR==1 {print $2}')
-  VK_MANAGER_FIXTURE_PORT="$port" VK_MANAGER_FIXTURE_PASSWORD="$password" VK_MANAGER_FIXTURE_PIN="$pin" \
-    VK_MANAGER_FIXTURE_KEY="$scratch/id_ed25519" swift test --package-path "$root/ios-manager" --filter testDisposableUbuntuOverSSH
+  if ! VK_MANAGER_FIXTURE_PORT="$port" VK_MANAGER_FIXTURE_PASSWORD="$password" VK_MANAGER_FIXTURE_PIN="$pin" \
+    VK_MANAGER_FIXTURE_KEY="$scratch/id_ed25519" swift test --package-path "$root/ios-manager" --filter testDisposableUbuntuOverSSH; then
+    printf '%s\n' "$password" | remote 'sudo -S -p "" journalctl -u ssh -n 25 --no-pager' || true
+    exit 1
+  fi
   exit 0
 fi
 
