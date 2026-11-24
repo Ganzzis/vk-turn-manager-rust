@@ -42,13 +42,13 @@ sudo ip -n "$ns" link add vk-ci-wg type wireguard
 # The namespaced wg process reads a root-owned fixture on both sudo implementations.
 root_scratch=$(sudo mktemp -d /run/vk-ci-wireguard.XXXXXXXX)
 sudo install -m 0600 "$scratch/client.key" "$root_scratch/client.key"
-sudo ip netns exec "$ns" wg set vk-ci-wg private-key "$root_scratch/client.key" \
+sudo nsenter --net="/run/netns/$ns" -- wg set vk-ci-wg private-key "$root_scratch/client.key" \
   peer "$server_public" allowed-ips 10.0.2.2/32 endpoint "$endpoint"
 sudo ip -n "$ns" address add "$client_address" dev vk-ci-wg
 sudo ip -n "$ns" link set vk-ci-wg up
 sudo ip -n "$ns" route add 10.0.2.2/32 dev vk-ci-wg
 if [[ ${WG_EXPECT_DENIED:-0} == 1 ]]; then
-  if sudo ip netns exec "$ns" curl --noproxy '*' --fail --silent \
+  if sudo nsenter --net="/run/netns/$ns" -- curl --noproxy '*' --fail --silent \
     --connect-timeout 3 --max-time 5 http://10.0.2.2:18080/nat-probe >/dev/null; then
     echo 'Revoked WireGuard client still reached the HTTP peer.' >&2
     exit 1
@@ -56,7 +56,7 @@ if [[ ${WG_EXPECT_DENIED:-0} == 1 ]]; then
   echo 'Revoked WireGuard client could no longer reach the HTTP peer.'
   exit 0
 fi
-reply=$(sudo ip netns exec "$ns" curl --noproxy '*' --fail --silent --show-error \
+reply=$(sudo nsenter --net="/run/netns/$ns" -- curl --noproxy '*' --fail --silent --show-error \
   --connect-timeout 10 --max-time 20 http://10.0.2.2:18080/nat-probe)
 [[ $reply == 'vk-turn-manager-nat-probe' ]]
 sudo nft list chain ip vk_turn_manager postrouting | grep -E 'counter packets [1-9][0-9]* bytes .* masquerade'
