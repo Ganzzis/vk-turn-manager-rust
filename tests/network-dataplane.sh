@@ -38,14 +38,17 @@ sudo ip -n "$ns" address add 192.0.2.2/30 dev vk-ci-peer
 sudo ip -n "$ns" link set vk-ci-peer up
 sudo ip -n "$ns" link set lo up
 
-sudo ip -n "$ns" link add vk-ci-wg type wireguard
-# The namespaced wg process reads a root-owned fixture on both sudo implementations.
+# Use the same wg-quick configuration path as the server, including its
+# handling of private key input on Ubuntu 26.04.
+{
+  printf '[Interface]\nPrivateKey = '
+  tr -d '\n' < "$scratch/client.key"
+  printf '\nAddress = %s\nTable = off\n' "$client_address"
+  printf '[Peer]\nPublicKey = %s\nAllowedIPs = 10.0.2.2/32\nEndpoint = %s\n' "$server_public" "$endpoint"
+} > "$scratch/vk-ci-wg.conf"
 root_scratch=$(sudo mktemp -d /run/vk-ci-wireguard.XXXXXXXX)
-sudo install -m 0600 "$scratch/client.key" "$root_scratch/client.key"
-sudo nsenter --net="/run/netns/$ns" -- wg set vk-ci-wg private-key "$root_scratch/client.key" \
-  peer "$server_public" allowed-ips 10.0.2.2/32 endpoint "$endpoint"
-sudo ip -n "$ns" address add "$client_address" dev vk-ci-wg
-sudo ip -n "$ns" link set vk-ci-wg up
+sudo install -m 0600 "$scratch/vk-ci-wg.conf" "$root_scratch/vk-ci-wg.conf"
+sudo nsenter --net="/run/netns/$ns" -- /bin/bash /usr/bin/wg-quick up "$root_scratch/vk-ci-wg.conf"
 sudo ip -n "$ns" route add 10.0.2.2/32 dev vk-ci-wg
 if [[ ${WG_EXPECT_DENIED:-0} == 1 ]]; then
   if sudo nsenter --net="/run/netns/$ns" -- curl --noproxy '*' --fail --silent \
