@@ -184,7 +184,10 @@ sudo journalctl -b -u vk-turn-wireguard.service -u vk-turn-srtp.service --no-pag
 exit 1
 GUEST
 
-remote 'bash client-lifecycle.sh finish && bash network-integration.sh finish && sudo systemctl is-active --quiet vkturn-nft.service'
+echo "Verifying WireGuard traffic and client revocation after reboot"
+remote 'timeout 90s bash client-lifecycle.sh finish'
+echo "Verifying NAT persistence and uninstall"
+remote 'timeout 90s bash network-integration.sh finish && sudo systemctl is-active --quiet vkturn-nft.service'
 remote 'sudo ./vk-turn-manager network enable && sudo ./vk-turn-manager uninstall &&
   sudo test ! -e /etc/vk-turn-network && sudo systemctl is-active --quiet vkturn-nft.service &&
   sudo nft list table ip vkturn >/dev/null'

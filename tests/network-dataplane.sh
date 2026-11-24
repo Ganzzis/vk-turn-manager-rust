@@ -3,6 +3,7 @@
 set -euo pipefail
 umask 077
 scratch=$(mktemp -d)
+root_scratch=
 ns=vk-ci-client
 server_link=vk-ci-host
 cleanup() {
@@ -11,6 +12,7 @@ cleanup() {
   fi
   sudo ip link delete "$server_link" 2>/dev/null || true
   sudo ip netns delete "$ns" 2>/dev/null || true
+  if [[ -n $root_scratch ]]; then sudo rm -rf -- "$root_scratch"; fi
   rm -rf "$scratch"
 }
 trap cleanup EXIT
@@ -37,8 +39,10 @@ sudo ip -n "$ns" link set vk-ci-peer up
 sudo ip -n "$ns" link set lo up
 
 sudo ip -n "$ns" link add vk-ci-wg type wireguard
-# Keep the key file outside the namespace; pass it through an anonymous pipe.
-cat "$scratch/client.key" | sudo ip netns exec "$ns" wg set vk-ci-wg private-key /dev/stdin \
+# The namespaced wg process reads a root-owned fixture on both sudo implementations.
+root_scratch=$(sudo mktemp -d /run/vk-ci-wireguard.XXXXXXXX)
+sudo install -m 0600 "$scratch/client.key" "$root_scratch/client.key"
+sudo ip netns exec "$ns" wg set vk-ci-wg private-key "$root_scratch/client.key" \
   peer "$server_public" allowed-ips 10.0.2.2/32 endpoint "$endpoint"
 sudo ip -n "$ns" address add "$client_address" dev vk-ci-wg
 sudo ip -n "$ns" link set vk-ci-wg up
