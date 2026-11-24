@@ -7,3 +7,6 @@ license = "MIT"
 description = "Ubuntu 24.04 installer for VK TURN Proxy SRTP and WireGuard"
 
 [dependencies]
+base64 = "0.22"
+serde_json = "1"
+tempfile = "3"

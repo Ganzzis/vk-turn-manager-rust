@@ -15,10 +15,19 @@ cleanup() {
 }
 trap cleanup EXIT
 
-wg genkey > "$scratch/client.key"
-client_public=$(wg pubkey < "$scratch/client.key")
-server_public=$(sudo wg show wg-vk public-key)
-sudo wg set wg-vk peer "$client_public" allowed-ips 10.240.42.2/32
+if [[ -n ${WG_CLIENT_CONF:-} ]]; then
+  sudo awk -F ' = ' '$1 == "PrivateKey" { print $2 }' "$WG_CLIENT_CONF" > "$scratch/client.key"
+  server_public=$(sudo awk -F ' = ' '$1 == "PublicKey" { print $2 }' "$WG_CLIENT_CONF")
+  client_address=$(sudo awk -F ' = ' '$1 == "Address" { print $2 }' "$WG_CLIENT_CONF")
+  endpoint=$(sudo awk -F ' = ' '$1 == "Endpoint" { print $2 }' "$WG_CLIENT_CONF")
+else
+  wg genkey > "$scratch/client.key"
+  client_public=$(wg pubkey < "$scratch/client.key")
+  server_public=$(sudo wg show wg-vk public-key)
+  client_address=10.240.42.2/32
+  endpoint=192.0.2.1:51820
+  sudo wg set wg-vk peer "$client_public" allowed-ips "$client_address"
+fi
 sudo ip netns add "$ns"
 sudo ip link add "$server_link" type veth peer name vk-ci-peer netns "$ns"
 sudo ip address add 192.0.2.1/30 dev "$server_link"
@@ -29,10 +38,19 @@ sudo ip -n "$ns" link set lo up
 
 sudo ip -n "$ns" link add vk-ci-wg type wireguard
 sudo ip netns exec "$ns" wg set vk-ci-wg private-key "$scratch/client.key" \
-  peer "$server_public" allowed-ips 10.0.2.2/32 endpoint 192.0.2.1:51820
-sudo ip -n "$ns" address add 10.240.42.2/32 dev vk-ci-wg
+  peer "$server_public" allowed-ips 10.0.2.2/32 endpoint "$endpoint"
+sudo ip -n "$ns" address add "$client_address" dev vk-ci-wg
 sudo ip -n "$ns" link set vk-ci-wg up
 sudo ip -n "$ns" route add 10.0.2.2/32 dev vk-ci-wg
+if [[ ${WG_EXPECT_DENIED:-0} == 1 ]]; then
+  if sudo ip netns exec "$ns" curl --noproxy '*' --fail --silent \
+    --connect-timeout 3 --max-time 5 http://10.0.2.2:18080/nat-probe >/dev/null; then
+    echo 'Revoked WireGuard client still reached the HTTP peer.' >&2
+    exit 1
+  fi
+  echo 'Revoked WireGuard client could no longer reach the HTTP peer.'
+  exit 0
+fi
 reply=$(sudo ip netns exec "$ns" curl --noproxy '*' --fail --silent --show-error \
   --connect-timeout 10 --max-time 20 http://10.0.2.2:18080/nat-probe)
 [[ $reply == 'vk-turn-manager-nat-probe' ]]

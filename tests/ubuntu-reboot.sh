@@ -73,7 +73,7 @@ wait_for_boot() {
 before=$(wait_for_boot)
 remote 'cloud-init status --wait && grep -x VERSION_ID=\"24.04\" /etc/os-release'
 scp "${ssh_opts[@]}" -P "$port" "$manager" ubuntu@127.0.0.1:vk-turn-manager
-scp "${ssh_opts[@]}" -P "$port" "$(dirname "$0")/network-integration.sh"   "$(dirname "$0")/network-dataplane.sh" ubuntu@127.0.0.1:~/
+scp "${ssh_opts[@]}" -P "$port" "$(dirname "$0")/network-integration.sh"   "$(dirname "$0")/network-dataplane.sh" "$(dirname "$0")/client-lifecycle.sh" ubuntu@127.0.0.1:~/
 remote 'bash -se' <<'GUEST'
 sudo apt-get update
 sudo apt-get install -y --no-install-recommends wireguard-tools nftables
@@ -112,6 +112,7 @@ UNIT
 sudo systemctl daemon-reload
 sudo systemctl enable --now vkturn-nft.service
 bash network-integration.sh prepare
+bash client-lifecycle.sh prepare
 GUEST
 
 echo "Rebooting Ubuntu VM, original boot ID: $before"
@@ -135,7 +136,7 @@ sudo journalctl -b -u vk-turn-wireguard.service -u vk-turn-srtp.service --no-pag
 exit 1
 GUEST
 
-remote 'bash network-dataplane.sh && bash network-integration.sh finish && sudo systemctl is-active --quiet vkturn-nft.service'
+remote 'bash client-lifecycle.sh finish && bash network-integration.sh finish && sudo systemctl is-active --quiet vkturn-nft.service'
 remote 'sudo ./vk-turn-manager network enable && sudo ./vk-turn-manager uninstall &&
   sudo test ! -e /etc/vk-turn-network && sudo systemctl is-active --quiet vkturn-nft.service &&
   sudo nft list table ip vkturn >/dev/null'

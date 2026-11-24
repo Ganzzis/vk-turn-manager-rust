@@ -3,6 +3,10 @@ name: VPS integration smoke test
 on:
   workflow_dispatch:
     inputs:
+      client_confirmation:
+        description: 'On main, enter TEST TEMPORARY PEER to test a disposable WireGuard peer.'
+        required: false
+        type: string
       reboot_confirmation:
         description: 'Leave blank for read-only smoke. Enter REBOOT DISPOSABLE VPS to also test NAT and reboot.'
         required: false
@@ -49,3 +53,21 @@ jobs:
           VPS_SSH_KEY: ${{ secrets.VPS_SSH_KEY }}
           VPS_KNOWN_HOSTS: ${{ secrets.VPS_KNOWN_HOSTS }}
         run: bash tests/vps-workflow.sh integration
+
+  client:
+    if: github.ref == 'refs/heads/main' && inputs.client_confirmation == 'TEST TEMPORARY PEER'
+    needs: smoke
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    environment: vps-test
+    steps:
+      - uses: actions/checkout@v6
+      - name: Build test binary
+        run: cargo build --locked --release
+      - name: Test and revoke a temporary peer
+        env:
+          VPS_HOST: ${{ secrets.VPS_HOST }}
+          VPS_USER: ${{ secrets.VPS_USER }}
+          VPS_SSH_KEY: ${{ secrets.VPS_SSH_KEY }}
+          VPS_KNOWN_HOSTS: ${{ secrets.VPS_KNOWN_HOSTS }}
+        run: bash tests/vps-workflow.sh client

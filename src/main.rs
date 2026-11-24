@@ -1,3 +1,4 @@
+mod client;
 mod network;
 
 use std::env;
@@ -46,9 +47,9 @@ fn systemctl(args: &[&str]) -> Result<()> {
     run("systemctl", args)
 }
 
-fn lock() -> Result<File> {
+fn open_lock() -> Result<File> {
     if output("id", &["-u"])?.stdout != b"0\n" {
-        return Err("Run install or uninstall with sudo".into());
+        return Err("Run this command with sudo".into());
     }
     let lock = OpenOptions::new()
         .write(true)
@@ -56,6 +57,17 @@ fn lock() -> Result<File> {
         .truncate(false)
         .mode(0o600)
         .open("/run/vk-turn-manager.lock")?;
+    Ok(lock)
+}
+
+fn lock_clients() -> Result<File> {
+    let lock = open_lock()?;
+    lock.lock()?;
+    Ok(lock)
+}
+
+fn lock() -> Result<File> {
+    let lock = open_lock()?;
     lock.try_lock()
         .map_err(|error| format!("Could not lock installer: {error}"))?;
     Ok(lock)
@@ -412,6 +424,7 @@ fn main() -> ExitCode {
         [command, subcommand] if command == "network" && subcommand == "disable" => {
             network::disable()
         }
+        [command, rest @ ..] if command == "client" => client::command(rest),
         [command] if command == "--help" || command == "-h" => {
             usage();
             return ExitCode::SUCCESS;
@@ -431,7 +444,7 @@ fn main() -> ExitCode {
 }
 
 fn usage() {
-    eprintln!("Usage:\n  vk-turn-manager install <wg-config-file>\n  vk-turn-manager status\n  vk-turn-manager uninstall\n  vk-turn-manager network status\n  vk-turn-manager network plan\n  vk-turn-manager network enable\n  vk-turn-manager network disable");
+    eprintln!("Usage:\n  vk-turn-manager install <wg-config-file>\n  vk-turn-manager status\n  vk-turn-manager uninstall\n  vk-turn-manager network status\n  vk-turn-manager network plan\n  vk-turn-manager network enable\n  vk-turn-manager network disable\n  vk-turn-manager client add NAME\n  vk-turn-manager client list\n  vk-turn-manager client remove NAME\n  vk-turn-manager client export NAME --wg-endpoint HOST:PORT --output FILE\n  vk-turn-manager client export NAME --srtp-endpoint HOST:PORT --vk-link-file FILE --output FILE");
 }
 
 #[cfg(test)]
