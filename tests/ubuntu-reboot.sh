@@ -97,7 +97,8 @@ if [[ -n ${VK_MANAGER_FIXTURE_BUNDLE:-} ]]; then
 printf "ubuntu:%s\nroot:%s\n" "$password" "$password" | chpasswd
 printf 'PasswordAuthentication yes\nPermitRootLogin yes\nHostKey /etc/ssh/ssh_host_ed25519_key\n' > /etc/ssh/sshd_config.d/00-vk-ci.conf
 # A non-interactive login may write a message before SSH command output.
-sed -i '1i echo "synthetic shell banner"' /root/.bashrc
+# Exercise noisy command sessions without injecting bytes into the SFTP protocol.
+sed -i '1i case "$BASH_EXECUTION_STRING" in */sftp-server*) ;; *) echo "synthetic shell banner";; esac' /root/.bashrc
 systemctl reload ssh
 printf 'ubuntu ALL=(ALL) ALL\n' > /etc/sudoers.d/91-vk-ci
 chmod 0440 /etc/sudoers.d/91-vk-ci

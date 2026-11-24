@@ -187,22 +187,26 @@ final class SSH: @unchecked Sendable {
     }
 
     func upload(_ files: [(String, Data)], to directory: String) async throws {
-        try await deadline(180) {
-            let sftp = try await self.client.openSFTP()
-            do {
-                for (name, data) in files {
-                    try Task.checkCancellation()
-                    try await sftp.withFile(filePath: directory + "/" + name,
-                                            flags: [.write, .create, .forceCreate]) { file in
-                        try await file.write(ByteBuffer(bytes: data))
+        do {
+            try await deadline(180) {
+                let sftp = try await self.client.openSFTP()
+                do {
+                    for (name, data) in files {
+                        try Task.checkCancellation()
+                        try await sftp.withFile(filePath: directory + "/" + name,
+                                                flags: [.write, .create, .forceCreate]) { file in
+                            try await file.write(ByteBuffer(bytes: data))
+                        }
                     }
+                    try await sftp.close()
+                } catch {
+                    try? await sftp.close()
+                    throw error
                 }
-                try await sftp.close()
-            } catch {
-                try? await sftp.close()
-                self.diagnostics.record(.sftpFailed)
-                throw error
             }
+        } catch {
+            diagnostics.record(.sftpFailed)
+            throw error
         }
     }
 }
