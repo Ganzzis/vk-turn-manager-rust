@@ -87,6 +87,26 @@ wait_for_boot() {
 echo "Waiting for first boot of Ubuntu $version"
 before=$(wait_for_boot)
 remote "cloud-init status --wait && grep -x 'VERSION_ID=\"$version\"' /etc/os-release"
+if [[ -n ${VK_MANAGER_FIXTURE_BUNDLE:-} ]]; then
+  # Only the ephemeral localhost VM uses these synthetic login credentials.
+  password=$(openssl rand -hex 24)
+  {
+    printf 'password=%s\n' "$password"
+    cat <<'FIXTURE'
+printf "ubuntu:%s\n" "$password" | chpasswd
+printf 'PasswordAuthentication yes\nHostKey /etc/ssh/ssh_host_ed25519_key\n' > /etc/ssh/sshd_config.d/00-vk-ci.conf
+systemctl reload ssh
+printf 'ubuntu ALL=(ALL) ALL\n' > /etc/sudoers.d/91-vk-ci
+chmod 0440 /etc/sudoers.d/91-vk-ci
+rm -f /etc/sudoers.d/90-cloud-init-users
+FIXTURE
+  } | remote 'sudo -n /bin/bash -se'
+  pin=$(remote 'cat /etc/ssh/ssh_host_ed25519_key.pub' | ssh-keygen -lf - | awk 'NR==1 {print $2}')
+  VK_MANAGER_FIXTURE_PORT="$port" VK_MANAGER_FIXTURE_PASSWORD="$password" VK_MANAGER_FIXTURE_PIN="$pin" \
+    VK_MANAGER_FIXTURE_KEY="$scratch/id_ed25519" swift test --package-path "$root/ios-manager" --filter testDisposableUbuntuOverSSH
+  exit 0
+fi
+
 cli_version=$("$manager" --version)
 archive="vk-turn-manager-v${cli_version##* }-linux-amd64"
 mkdir "$scratch/$archive"

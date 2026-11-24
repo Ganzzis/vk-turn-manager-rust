@@ -132,27 +132,31 @@ fn release_asset(architecture: &str) -> Result<(&'static str, &'static str)> {
 }
 
 fn download_server(asset: &str, checksum: &str, target: &str) -> Result<()> {
-    run(
-        "curl",
-        &[
-            "--disable",
-            "--fail",
-            "--silent",
-            "--show-error",
-            "--location",
-            "--proto",
-            "=https",
-            "--proto-redir",
-            "=https",
-            "--connect-timeout",
-            "15",
-            "--max-time",
-            "120",
-            "--output",
-            target,
-            &format!("{RELEASE}/{asset}"),
-        ],
-    )?;
+    if let Some(source) = env::var_os("VK_TURN_SRTP_FILE") {
+        fs::copy(source, target)?;
+    } else {
+        run(
+            "curl",
+            &[
+                "--disable",
+                "--fail",
+                "--silent",
+                "--show-error",
+                "--location",
+                "--proto",
+                "=https",
+                "--proto-redir",
+                "=https",
+                "--connect-timeout",
+                "15",
+                "--max-time",
+                "120",
+                "--output",
+                target,
+                &format!("{RELEASE}/{asset}"),
+            ],
+        )?;
+    }
     let digest = output("sha256sum", &[target])?;
     verify_digest(&digest, checksum)?;
     fs::set_permissions(target, fs::Permissions::from_mode(0o755))?;
