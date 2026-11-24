@@ -12,6 +12,7 @@ struct RelayCredentials: Codable {
     var password = ""
     var expiresAt = ""
     var certificateSha256: String?
+    var useTcp: Bool? = true
 }
 
 struct Profile: Codable {

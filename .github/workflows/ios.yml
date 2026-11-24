@@ -12,6 +12,22 @@ permissions:
   contents: read
 
 jobs:
+  relay-interoperability:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+      - name: Fetch and verify the pinned SRTP server
+        run: |
+          set -euo pipefail
+          server="$RUNNER_TEMP/server-linux-amd64"
+          curl --fail --silent --show-error --location \
+            https://github.com/anton48/vk-turn-proxy/releases/download/srtp-build478/server-linux-amd64 -o "$server"
+          printf '%s  %s\n' 21b4c5e02c8b6658521d17ecbbc2f25487b2cd9f863a7ff70a0a66783af63e98 "$server" | sha256sum -c -
+          chmod 700 "$server"
+          printf 'VK_SRTP_SERVER=%s\n' "$server" >> "$GITHUB_ENV"
+      - name: Verify WireGuard via local TURN and upstream DTLS-SRTP
+        run: cargo test --manifest-path ios/Core/Cargo.toml --locked wireguard_through_turn_and_build478 -- --ignored
   ios:
     runs-on: macos-15
     timeout-minutes: 30

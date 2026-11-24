@@ -32,6 +32,8 @@ use tokio::{
 };
 use turn::client::{Client, ClientConfig};
 use util::Conn;
+#[path = "relay_tcp.rs"]
+mod tcp;
 
 const LIMIT: usize = 1400;
 const QUEUE: usize = 64;
@@ -51,6 +53,7 @@ pub(super) struct Credentials {
     password: String,
     expires_at: String,
     certificate_sha256: Option<String>,
+    use_tcp: Option<bool>,
 }
 
 impl Credentials {
@@ -90,6 +93,9 @@ struct DtlsLane {
 
 #[async_trait]
 impl Conn for DtlsLane {
+    fn as_any(&self) -> &(dyn std::any::Any + Send + Sync) {
+        self
+    }
     async fn connect(&self, _: SocketAddr) -> util::Result<()> {
         Ok(())
     }
@@ -269,30 +275,42 @@ async fn run(
     credentials: Credentials,
     mut outgoing: mpsc::Receiver<Vec<u8>>,
     incoming: mpsc::Sender<Vec<u8>>,
-    stopped: oneshot::Receiver<()>,
+    mut stopped: oneshot::Receiver<()>,
     status: Arc<AtomicI32>,
 ) {
     let result = async {
-        let expires = credentials.expiry().filter(|duration| *duration > Duration::from_secs(30)).ok_or(NEED_CREDENTIALS)?;
+        let expires = credentials.expiry().filter(|duration| *duration > Duration::from_secs(30) && *duration <= Duration::from_secs(86400)).ok_or(NEED_CREDENTIALS)?;
+        let deadline = tokio::time::Instant::now() + expires;
         let relay_addr = timeout(Duration::from_secs(5), address(&credentials.address))
             .await.ok().flatten().ok_or(TURN_FAILED)?;
         let peer = timeout(Duration::from_secs(5), address(&endpoint))
             .await.ok().flatten().ok_or(TURN_FAILED)?;
-        let udp = UdpSocket::bind("0.0.0.0:0").await.map_err(|_| TURN_FAILED)?;
+        let transport: Arc<dyn Conn + Send + Sync> = if credentials.use_tcp.unwrap_or(true) {
+            Arc::new(timeout(Duration::from_secs(5), tcp::TurnTcp::connect(relay_addr))
+                .await.map_err(|_| TURN_FAILED)?.map_err(|_| TURN_FAILED)?)
+        } else {
+            Arc::new(UdpSocket::bind("0.0.0.0:0").await.map_err(|_| TURN_FAILED)?)
+        };
         let client = Client::new(ClientConfig {
             stun_serv_addr: String::new(), turn_serv_addr: relay_addr.to_string(),
             username: credentials.username.clone(), password: credentials.password.clone(),
             realm: String::new(), software: String::new(), rto_in_ms: 250,
-            conn: Arc::new(udp), vnet: None,
+            conn: transport, vnet: None,
         }).await.map_err(|_| TURN_FAILED)?;
         client.listen().await.map_err(|_| TURN_FAILED)?;
-        let acquired = timeout(Duration::from_secs(8), client.allocate()).await;
+        let acquired = tokio::select! {
+            result = timeout(Duration::from_secs(8), client.allocate()) => result,
+            _ = &mut stopped => {
+                let _ = timeout(Duration::from_secs(1), client.close()).await;
+                return Ok(());
+            }
+        };
         let result = match acquired {
             Ok(Ok(socket)) => {
                 let socket = Arc::new(socket);
                 let result = tokio::select! {
                     outcome = exchange(socket.clone(), peer, &credentials, &mut outgoing, &incoming, &status) => outcome,
-                    _ = tokio::time::sleep(expires) => Err(NEED_CREDENTIALS),
+                    _ = tokio::time::sleep_until(deadline) => Err(NEED_CREDENTIALS),
                     _ = stopped => Ok(()),
                 };
                 let _ = timeout(Duration::from_secs(1), socket.close()).await;
@@ -400,5 +418,202 @@ pub unsafe extern "C" fn vkt_relay_receive(
 pub unsafe extern "C" fn vkt_relay_free(value: *mut c_void) {
     if !value.is_null() {
         drop(unsafe { Box::from_raw(value.cast::<Handle>()) });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::Tunnel;
+    use boringtun::noise::{Tunn, TunnResult};
+    use boringtun::x25519::{PublicKey, StaticSecret};
+    use std::{
+        net::IpAddr,
+        process::{Child, Command, Stdio},
+    };
+    use turn::{
+        auth::{generate_auth_key, AuthHandler},
+        relay::relay_static::RelayAddressGeneratorStatic,
+        server::{
+            config::{ConnConfig, ServerConfig},
+            Server,
+        },
+    };
+    use util::vnet::net::Net;
+
+    const REALM: &str = "fixture.invalid";
+    struct Auth;
+    impl AuthHandler for Auth {
+        fn auth_handle(
+            &self,
+            user: &str,
+            realm: &str,
+            _: SocketAddr,
+        ) -> Result<Vec<u8>, turn::Error> {
+            if user != "synthetic" || realm != REALM {
+                return Err(turn::Error::ErrFakeErr);
+            }
+            Ok(generate_auth_key(user, realm, "synthetic-password"))
+        }
+    }
+
+    struct ChildGuard(Child);
+    impl Drop for ChildGuard {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+
+    fn credentials(addr: SocketAddr) -> Credentials {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        Credentials {
+            address: addr.to_string(),
+            username: "synthetic".into(),
+            password: "synthetic-password".into(),
+            expires_at: (now + 120).to_string(),
+            certificate_sha256: None,
+            use_tcp: Some(false),
+        }
+    }
+
+    #[test]
+    fn rejects_expiry_or_invalid_pin() {
+        let mut value = credentials("127.0.0.1:3478".parse().unwrap());
+        assert!(value.valid());
+        value.expires_at = "0".into();
+        assert!(value.expiry().is_none());
+        value.certificate_sha256 = Some("bad pin".into());
+        assert!(!value.valid());
+    }
+
+    #[tokio::test]
+    #[ignore = "requires the SHA-256-verified upstream srtp-build478 executable"]
+    async fn wireguard_through_turn_and_build478() {
+        let executable = std::env::var_os("VK_SRTP_SERVER").expect("set VK_SRTP_SERVER");
+        let listener = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
+        let turn_endpoint = listener.local_addr().unwrap();
+        let turn = Server::new(ServerConfig {
+            conn_configs: vec![ConnConfig {
+                conn: listener,
+                relay_addr_generator: Box::new(RelayAddressGeneratorStatic {
+                    relay_address: IpAddr::from([127, 0, 0, 1]),
+                    address: "127.0.0.1".into(),
+                    net: Arc::new(Net::new(None)),
+                }),
+            }],
+            realm: REALM.into(),
+            auth_handler: Arc::new(Auth),
+            channel_bind_timeout: Duration::ZERO,
+            alloc_close_notify: None,
+        })
+        .await
+        .unwrap();
+        let backend = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let backend_addr = backend.local_addr().unwrap();
+        let free = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let srtp_endpoint = free.local_addr().unwrap();
+        drop(free);
+        let mut _server = ChildGuard(
+            Command::new(executable)
+                .args([
+                    "-srtp",
+                    "-listen",
+                    &srtp_endpoint.to_string(),
+                    "-connect",
+                    &backend_addr.to_string(),
+                ])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+                .unwrap(),
+        );
+        tokio::time::sleep(Duration::from_millis(250)).await;
+        assert!(_server.0.try_wait().unwrap().is_none());
+        let server_private = StaticSecret::from([29; 32]);
+        let client_private = StaticSecret::from([17; 32]);
+        let server_public = PublicKey::from(&server_private);
+        let client_public = PublicKey::from(&client_private);
+        let echo = tokio::spawn(async move {
+            let mut wireguard = Tunn::new(server_private, client_public, None, None, 2, None);
+            let mut recv = [0; 2048];
+            let mut output = [0; 2048];
+            let mut encoded = [0; 2048];
+            loop {
+                let (length, addr) = backend.recv_from(&mut recv).await.unwrap();
+                match wireguard.decapsulate(None, &recv[..length], &mut output) {
+                    TunnResult::WriteToNetwork(reply) => {
+                        backend.send_to(reply, addr).await.unwrap();
+                    }
+                    TunnResult::WriteToTunnelV4(packet, _) => {
+                        let source: [u8; 4] = packet[12..16].try_into().unwrap();
+                        let destination: [u8; 4] = packet[16..20].try_into().unwrap();
+                        packet[12..16].copy_from_slice(&destination);
+                        packet[16..20].copy_from_slice(&source);
+                        if let TunnResult::WriteToNetwork(reply) =
+                            wireguard.encapsulate(packet, &mut encoded)
+                        {
+                            backend.send_to(reply, addr).await.unwrap();
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        });
+
+        let mut handle = start(srtp_endpoint.to_string(), credentials(turn_endpoint)).unwrap();
+        timeout(Duration::from_secs(15), async {
+            loop {
+                match handle.status.load(Ordering::Acquire) {
+                    READY => break,
+                    INITIALIZING => tokio::time::sleep(Duration::from_millis(20)).await,
+                    code => panic!("relay failed with stage code {code}"),
+                }
+            }
+        })
+        .await
+        .expect("relay ready");
+        let mut client = Tunnel {
+            wg: Tunn::new(client_private, server_public, None, None, 1, None),
+            routes: vec![(0, 0)],
+        };
+        let mut buffer = [0; 2048];
+        assert!(client.wg.time_since_last_handshake().is_none());
+        let (1, n) = client.step(0, &[], &mut buffer) else {
+            panic!("missing initiation");
+        };
+        handle.outgoing.send(buffer[..n].to_vec()).await.unwrap();
+        let packet = timeout(Duration::from_secs(6), handle.incoming.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        let (1, n) = client.step(2, &packet, &mut buffer) else {
+            panic!("missing WG confirmation");
+        };
+        assert!(client.wg.time_since_last_handshake().is_some());
+        handle.outgoing.send(buffer[..n].to_vec()).await.unwrap();
+        let mut ip = [0; 20];
+        ip[0] = 0x45;
+        ip[3] = 20;
+        ip[12..20].copy_from_slice(&[192, 0, 2, 2, 192, 0, 2, 1]);
+        let (1, n) = client.step(1, &ip, &mut buffer) else {
+            panic!("missing encrypted IPv4");
+        };
+        handle.outgoing.send(buffer[..n].to_vec()).await.unwrap();
+        let packet = timeout(Duration::from_secs(6), handle.incoming.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        let (2, n) = client.step(2, &packet, &mut buffer) else {
+            panic!("missing decrypted IPv4");
+        };
+        assert_eq!(n, 20);
+        assert_eq!(&buffer[12..20], &[192, 0, 2, 1, 192, 0, 2, 2]);
+        drop(handle);
+        echo.abort();
+        turn.close().await.unwrap();
     }
 }

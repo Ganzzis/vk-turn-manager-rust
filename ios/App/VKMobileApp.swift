@@ -163,6 +163,10 @@ private struct ProfileEditor: View {
                             TextField("TURN endpoint (host:port)", text: relay.address)
                             SecureField("Temporary username", text: relay.username)
                             SecureField("Temporary password", text: relay.password)
+                            Toggle("TURN over TCP", isOn: Binding(
+                                get: { relay.useTcp.wrappedValue ?? true },
+                                set: { relay.useTcp.wrappedValue = $0 }
+                            ))
                             TextField("Expiry (Unix seconds)", text: relay.expiresAt).keyboardType(.numberPad)
                             TextField("DTLS certificate SHA-256 (optional)", text: optional(relay.certificateSha256))
                             Text("Without a certificate pin, the outer DTLS peer is unverified. WireGuard still verifies its peer.")
