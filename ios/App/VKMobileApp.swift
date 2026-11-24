@@ -136,7 +136,7 @@ struct ConnectionsView: View {
 private struct ProfileEditor: View {
     @Environment(\.dismiss) private var dismiss
     @State var profile: Profile
-    @State private var error = ""
+    @State private var validationMessage = ""
     let save: (Profile) throws -> Void
 
     var body: some View {
@@ -160,7 +160,7 @@ private struct ProfileEditor: View {
                         Text("SRTP transport is unavailable in this build.").foregroundStyle(.secondary)
                     }
                 }
-                if !error.isEmpty { Text(error).foregroundStyle(.red) }
+                if !validationMessage.isEmpty { Text(validationMessage).foregroundStyle(.red) }
             }
             .textInputAutocapitalization(.never)
             .autocorrectionDisabled()
@@ -170,8 +170,8 @@ private struct ProfileEditor: View {
                 ToolbarItem(placement: .confirmationAction) {
                     Button("Save") {
                         do { try save(profile) }
-                        catch let failure as MobileError { error = failure.localizedDescription }
-                        catch { error = MobileError.invalidProfile.localizedDescription }
+                        catch let failure as MobileError { validationMessage = failure.localizedDescription }
+                        catch { validationMessage = MobileError.invalidProfile.localizedDescription }
                     }
                 }
             }
