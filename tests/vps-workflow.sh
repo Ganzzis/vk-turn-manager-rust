@@ -39,6 +39,11 @@ if [[ $mode == smoke ]]; then
     sudo -n '$remote_dir/vk-turn-manager' network plan"
   exit
 fi
+if [[ $mode == client ]]; then
+  scp "${opts[@]}" tests/vps-client-lifecycle.sh "$target:$remote_dir/vps-client-lifecycle.sh"
+  remote "bash '$remote_dir/vps-client-lifecycle.sh'"
+  exit
+fi
 [[ $mode == integration ]]
 scp "${opts[@]}" tests/network-integration.sh "$target:$remote_dir/network-integration.sh"
 remote "bash '$remote_dir/network-integration.sh' prepare"
