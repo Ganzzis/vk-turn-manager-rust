@@ -36,7 +36,8 @@ jobs:
         run: |
           set -euo pipefail
           bash scripts/package-server-release.sh "$RELEASE_TARGET" dist
-          bash scripts/package-server-release.sh "$RELEASE_TARGET" "$RUNNER_TEMP/repeat"
+          CARGO_TARGET_DIR="$RUNNER_TEMP/release-repeat-target" \
+            bash scripts/package-server-release.sh "$RELEASE_TARGET" "$RUNNER_TEMP/repeat"
           for archive in dist/*.tar.gz; do
             cmp "$archive" "$RUNNER_TEMP/repeat/${archive##*/}"
           done
