@@ -18,7 +18,7 @@ final class TunnelController: ObservableObject {
     }
 
     var title: String {
-        if starting { return "Starting WireGuard" }
+        if starting { return "Starting tunnel" }
         switch status {
         case .connecting: return "Connecting"
         case .connected: return "Connected"
@@ -58,7 +58,7 @@ final class TunnelController: ObservableObject {
 
     func connect(_ id: UUID, profile: Profile) async throws {
         guard !busy else { throw MobileError.busy }
-        guard profile.transport == .direct else { throw MobileError.unavailableTransport }
+        guard profile.transport == .direct || profile.relay != nil else { throw MobileError.unavailableTransport }
         _ = try profile.coreJSON()
         starting = true
         diagnostic = ""

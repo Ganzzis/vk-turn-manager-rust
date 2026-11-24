@@ -15,4 +15,11 @@ int32_t vkt_tunnel_ready(void *tunnel);
 int32_t vkt_tunnel_step(void *tunnel, int32_t operation, const uint8_t *input,
                         size_t input_len, uint8_t *output, size_t output_len,
                         size_t *written);
+/* The relay is ready for WireGuard datagrams at status 1. The caller still
+ * needs to verify the WireGuard handshake before exposing VPN connectivity. */
+void *vkt_relay_new(const char *profile);
+int32_t vkt_relay_status(void *relay);
+int32_t vkt_relay_send(void *relay, const uint8_t *input, size_t length);
+size_t vkt_relay_receive(void *relay, uint8_t *output, size_t capacity);
+void vkt_relay_free(void *relay);
 #endif

@@ -54,14 +54,21 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
 final class Session {
     private weak var provider: PacketTunnelProvider?
     private let queue: DispatchQueue
-    private let connection: NWConnection
+    private let connection: NWConnection?
+    private var relay: UnsafeMutableRawPointer?
+    private var relayStarted = false
+    private let relayProfileJSON: String?
+    private var retryUsed = false
+    private var datagram = [UInt8](repeating: 0, count: 2048)
     private let network: NEPacketTunnelNetworkSettings
     private var core: UnsafeMutableRawPointer?
     private var startup: ((Error?) -> Void)?
     private var timer: DispatchSourceTimer?
-    private let startupDeadline = DispatchTime.now() + .seconds(20)
+    private var startupDeadline: DispatchTime
     private var applying = false
-    private var running = false
+    private var packetGate = PacketFlowGate()
+    private var readingPackets = false
+    private var running: Bool { packetGate.active }
     private var receiving = false
     private var outbound = 0
     private var inbound = 0
@@ -73,7 +80,7 @@ final class Session {
     }
 
     init(profile: Profile, provider: PacketTunnelProvider, queue: DispatchQueue, completion: @escaping (Error?) -> Void) throws {
-        guard profile.transport == .direct else { throw MobileError.unavailableTransport }
+        if profile.transport == .srtp && profile.relay == nil { throw MobileError.unavailableTransport }
         let json = try profile.coreJSON()
         guard let colon = profile.endpoint.lastIndex(of: ":"),
               let number = UInt16(profile.endpoint[profile.endpoint.index(after: colon)...]),
@@ -94,8 +101,18 @@ final class Session {
             network.dnsSettings = NEDNSSettings(servers: servers)
         }
         network.mtu = 1280
-        connection = NWConnection(host: NWEndpoint.Host(host), port: port, using: .udp)
+        connection = profile.transport == .direct
+            ? NWConnection(host: NWEndpoint.Host(host), port: port, using: .udp) : nil
+        startupDeadline = DispatchTime.now() + .seconds(profile.transport == .direct ? 20 : 42)
         guard let handle = json.withCString({ vkt_tunnel_new($0) }) else { throw MobileError.invalidProfile }
+        relayProfileJSON = profile.transport == .srtp ? json : nil
+        if profile.transport == .srtp {
+            guard let srtp = json.withCString({ vkt_relay_new($0) }) else {
+                vkt_tunnel_free(handle)
+                throw MobileError.relayCredentials
+            }
+            relay = srtp
+        }
         core = handle
         self.provider = provider
         self.queue = queue
@@ -104,10 +121,11 @@ final class Session {
 
     deinit {
         if let core { vkt_tunnel_free(core) }
+        if let relay { vkt_relay_free(relay) }
     }
 
     func start() {
-        connection.stateUpdateHandler = { [weak self] state in
+        connection?.stateUpdateHandler = { [weak self] state in
             guard let self, self.core != nil else { return }
             switch state {
             case .ready:
@@ -119,14 +137,17 @@ final class Session {
                 break
             }
         }
-        connection.start(queue: queue)
+        connection?.start(queue: queue)
         let timer = DispatchSource.makeTimerSource(queue: queue)
-        timer.schedule(deadline: .now() + .milliseconds(250), repeating: .milliseconds(250))
+        let interval = relay == nil ? 250 : 20
+        timer.schedule(deadline: .now() + .milliseconds(interval), repeating: .milliseconds(interval))
         timer.setEventHandler { [weak self] in
             guard let self, self.core != nil else { return }
             if !self.running && DispatchTime.now() >= self.startupDeadline {
                 self.fail(.handshakeTimeout)
-            } else if case .ready = self.connection.state {
+            } else if let relay = self.relay {
+                self.pollRelay(relay)
+            } else if let connection = self.connection, case .ready = connection.state {
                 self.step(3, Data())
             }
         }
@@ -144,9 +165,14 @@ final class Session {
     private func close() {
         timer?.cancel()
         timer = nil
-        connection.stateUpdateHandler = nil
-        connection.cancel()
-        running = false
+        connection?.stateUpdateHandler = nil
+        connection?.cancel()
+        if let relay {
+            vkt_relay_free(relay)
+            self.relay = nil
+        }
+        packetGate.pause()
+        provider?.reasserting = false
         if let core {
             vkt_tunnel_free(core)
             self.core = nil
@@ -164,7 +190,7 @@ final class Session {
     private func receive() {
         guard !receiving else { return }
         receiving = true
-        connection.receiveMessage { [weak self] data, _, _, error in
+        connection?.receiveMessage { [weak self] data, _, _, error in
             guard let self, self.core != nil else { return }
             self.receiving = false
             if error != nil {
@@ -184,8 +210,66 @@ final class Session {
         }
     }
 
+    private func pollRelay(_ handle: UnsafeMutableRawPointer) {
+        switch vkt_relay_status(handle) {
+        case 0: return
+        case 1:
+            if !relayStarted {
+                relayStarted = true
+                step(0, Data())
+            }
+        case -2: fail(.relayCredentials); return
+        case -3: fail(.turnAllocation); return
+        case -4: fail(.dtlsHandshake); return
+        case -5: reconnectRelay(); return
+        default: fail(.socket); return
+        }
+        for _ in 0..<64 {
+            let count = datagram.withUnsafeMutableBufferPointer {
+                vkt_relay_receive(handle, $0.baseAddress, $0.count)
+            }
+            if count == 0 { break }
+            if step(2, Data(datagram.prefix(count))) == 1 {
+                for _ in 0..<64 { if step(2, Data()) != 1 { break } }
+            }
+        }
+        installRoutesIfAuthenticated()
+        step(3, Data())
+    }
+
+    private func reconnectRelay() {
+        guard packetGate.routesInstalled, running, !retryUsed, let json = relayProfileJSON,
+              let newCore = json.withCString({ vkt_tunnel_new($0) }) else {
+            fail(.socket)
+            return
+        }
+        retryUsed = true
+        packetGate.pause()
+        provider?.reasserting = true
+        if let relay {
+            vkt_relay_free(relay)
+            self.relay = nil
+        }
+        guard let newRelay = json.withCString({ vkt_relay_new($0) }) else {
+            vkt_tunnel_free(newCore)
+            fail(.socket)
+            return
+        }
+        if let core { vkt_tunnel_free(core) }
+        core = newCore
+        relay = newRelay
+        relayStarted = false
+        startupDeadline = DispatchTime.now() + .seconds(42)
+    }
+
     private func installRoutesIfAuthenticated() {
         guard !applying, !running, let core, vkt_tunnel_ready(core) == 1, let provider else { return }
+        if packetGate.routesInstalled {
+            packetGate.activate()
+            provider.reasserting = false
+            readPackets()
+            return
+        }
         applying = true
         provider.setTunnelNetworkSettings(network) { [weak self] error in
             guard let self else { return }
@@ -194,7 +278,8 @@ final class Session {
                 if error != nil {
                     self.fail(.networkSettings)
                 } else {
-                    self.running = true
+                    self.applying = false
+                    self.packetGate.activate()
                     let pending = self.startup
                     self.startup = nil
                     pending?(nil)
@@ -205,14 +290,19 @@ final class Session {
     }
 
     private func readPackets() {
-        provider?.packetFlow.readPackets { [weak self] packets, families in
+        guard running, !readingPackets, let provider else { return }
+        let generation = packetGate.generation
+        readingPackets = true
+        provider.packetFlow.readPackets { [weak self] packets, families in
             guard let self else { return }
             self.queue.async {
-                guard self.running, self.core != nil else { return }
+                self.readingPackets = false
+                guard self.core != nil else { return }
+                defer { self.readPackets() }
+                guard self.packetGate.accepts(generation) else { return }
                 for (packet, family) in zip(packets, families) where family.int32Value == AF_INET && self.pendingSends < 256 {
                     if self.step(1, packet) == 1 { self.outbound += 1 }
                 }
-                self.readPackets()
             }
         }
     }
@@ -227,7 +317,11 @@ final class Session {
                                 data.count, output.baseAddress, output.count, &written)
             }
         }
-        if event == 1 && pendingSends < 256 {
+        if event == 1, relayProfileJSON != nil {
+            guard let relay else { return 0 }
+            return buffer.withUnsafeBufferPointer { vkt_relay_send(relay, $0.baseAddress, written) }
+        }
+        if event == 1, let connection, pendingSends < 256 {
             pendingSends += 1
             connection.send(content: Data(buffer.prefix(written)), completion: .contentProcessed { [weak self] error in
                 guard let self, self.core != nil else { return }

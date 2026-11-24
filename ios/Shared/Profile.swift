@@ -6,6 +6,15 @@ enum Transport: String, Codable {
     var title: String { self == .direct ? "Direct WireGuard" : "VK TURN · SRTP" }
 }
 
+struct RelayCredentials: Codable {
+    var address = ""
+    var username = ""
+    var password = ""
+    var expiresAt = ""
+    var certificateSha256: String?
+    var useTcp: Bool? = true
+}
+
 struct Profile: Codable {
     var name = ""
     var address = ""
@@ -17,6 +26,7 @@ struct Profile: Codable {
     var dns: String?
     var transport = Transport.direct
     var vkLink: String?
+    var relay: RelayCredentials?
 
     func coreJSON() throws -> String {
         let data = try JSONEncoder().encode(self)
@@ -50,6 +60,7 @@ struct Profile: Codable {
 enum MobileError: Int, LocalizedError, CustomNSError {
     case invalidProfile = 1, invalidLink, secureStorage, unavailableTransport
     case invalidConfiguration, socket, handshakeTimeout, networkSettings, cancelled, busy
+    case relayCredentials, turnAllocation, dtlsHandshake
 
     static var errorDomain: String { "org.ganzzis.vkturn.mobile" }
     var errorCode: Int { rawValue }
@@ -60,7 +71,10 @@ enum MobileError: Int, LocalizedError, CustomNSError {
         case .invalidProfile: return "Check the keys, IPv4 fields, and endpoint."
         case .invalidLink: return "This VK TURN connection link is invalid or uses an unsupported mode."
         case .secureStorage: return "Secure profile storage is unavailable. Check the signing and Keychain group."
-        case .unavailableTransport: return "VK TURN SRTP is not available in this build."
+        case .unavailableTransport: return "Complete VK authorization with a supported client and enter temporary TURN credentials."
+        case .relayCredentials: return "Temporary TURN credentials are missing or expired."
+        case .turnAllocation: return "The TURN relay could not allocate a connection."
+        case .dtlsHandshake: return "DTLS-SRTP negotiation or certificate verification failed."
         case .invalidConfiguration: return "The tunnel configuration is unavailable."
         case .socket: return "The tunnel UDP session failed."
         case .handshakeTimeout: return "The WireGuard peer did not complete a handshake."
