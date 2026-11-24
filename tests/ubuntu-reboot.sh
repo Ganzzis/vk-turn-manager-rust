@@ -164,7 +164,9 @@ printf '3\n0\n' | sudo ./vk-turn-manager menu | grep 'ci-alpha'
 GUEST
 
 echo "Rebooting Ubuntu VM, original boot ID: $before"
-remote 'sudo systemctl reboot --no-block'
+# Flush the disposable guest's disk and reboot without waiting for unrelated
+# cloud-image services to shut down. The new boot ID still verifies a real reboot.
+remote 'sudo sync && sudo systemctl reboot --force --no-block' || [[ $? == 255 ]]
 after=$(wait_for_boot "$before")
 echo "Ubuntu VM rebooted, new boot ID: $after"
 
