@@ -371,6 +371,7 @@ mod tests {
         assert_eq!(imported.address, "172.21.7.2/32");
         assert_eq!(imported.endpoint, "srtp.example:56004");
         assert_eq!(imported.allowed_ips, "0.0.0.0/0");
+        assert!(imported.relay.is_none());
         assert_eq!(
             imported.vk_link.as_deref(),
             Some("https://vk.ru/call/join/synthetic")
@@ -379,7 +380,7 @@ mod tests {
     }
 
     #[test]
-    fn imports_verified_shape_and_refuses_srtp_in_direct_engine() {
+    fn imports_verified_shape_and_requires_srtp_relay_credentials() {
         let p = direct();
         let fixture = serde_json::json!({"type":"connection","version":1,"settings":{
             "serverName":p.name, "tunnelAddress":p.address, "privateKey":p.private_key,
@@ -416,7 +417,10 @@ mod tests {
 
     #[test]
     fn performs_real_wireguard_handshake_and_transports_ipv4() {
-        let client = direct();
+        let mut legacy = serde_json::to_value(direct()).unwrap();
+        legacy.as_object_mut().unwrap().remove("relay");
+        let client: Profile = serde_json::from_value(legacy).unwrap();
+        assert!(client.transport == Transport::Direct && client.relay.is_none());
         let mut server = direct();
         server.private_key = general_purpose::STANDARD.encode([29; 32]);
         server.peer_public_key = general_purpose::STANDARD
@@ -449,5 +453,15 @@ mod tests {
             panic!("decrypted data");
         };
         assert_eq!(&right[..n], &ip);
+
+        ip[12..16].copy_from_slice(&[192, 0, 2, 1]);
+        ip[16..20].copy_from_slice(&[192, 0, 2, 2]);
+        let (1, n) = b.step(1, &ip, &mut right) else {
+            panic!("encrypted reply");
+        };
+        let (2, n) = a.step(2, &right[..n], &mut left) else {
+            panic!("decrypted reply");
+        };
+        assert_eq!(&left[..n], &ip);
     }
 }
