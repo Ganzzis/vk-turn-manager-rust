@@ -1,3 +1,9 @@
 /target/
 *.log
 .env
+
+/ios/Core/target/
+/ios/build/
+/ios/VKMobile.xcodeproj/
+/ios/App/Info.plist
+/ios/Tunnel/Info.plist
