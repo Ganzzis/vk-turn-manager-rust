@@ -18,7 +18,8 @@ final class ProfileTests: XCTestCase {
         let settings: [String: Any] = [
             "serverName": "Synthetic", "privateKey": key, "peerPublicKey": key,
             "tunnelAddress": "192.0.2.2/32", "peerAddress": "srtp.example:56004",
-            "vkLink": "https://vk.ru/call/join/synthetic", "useSrtp": true
+            "vkLink": "https://vk.ru/call/join/synthetic", "useSrtp": true,
+            "allowedIPs": "198.51.100.0/24"
         ]
         let payload = try JSONSerialization.data(withJSONObject: ["version": 1, "type": "connection", "settings": settings])
         let encoded = payload.base64EncodedString()
@@ -28,6 +29,7 @@ final class ProfileTests: XCTestCase {
         let imported = try Profile.importLink("vkturnproxy://import?data=" + encoded)
         XCTAssertEqual(imported.transport, .srtp)
         XCTAssertEqual(imported.endpoint, "srtp.example:56004")
+        XCTAssertEqual(imported.allowedIPs, "198.51.100.0/24")
         XCTAssertThrowsError(try Profile.importLink("vkturnproxy://import?data=broken"))
         XCTAssertNil(try imported.coreJSON().withCString { vkt_tunnel_new($0) })
     }

@@ -15,6 +15,7 @@ struct Profile {
     peer_public_key: String,
     preshared_key: Option<String>,
     endpoint: String,
+    #[serde(rename = "allowedIPs")]
     allowed_ips: String,
     dns: Option<String>,
     transport: Transport,
@@ -44,6 +45,7 @@ struct LinkSettings {
     peer_public_key: String,
     preshared_key: Option<String>,
     tunnel_address: String,
+    #[serde(rename = "allowedIPs")]
     allowed_ips: Option<String>,
     dns_servers: Option<String>,
     peer_address: String,
@@ -360,11 +362,15 @@ mod tests {
         let fixture = serde_json::json!({"type":"connection","version":1,"settings":{
             "serverName":p.name, "tunnelAddress":p.address, "privateKey":p.private_key,
             "peerPublicKey":p.peer_public_key, "peerAddress":"srtp.example:56004",
-            "vkLink":"https://vk.ru/call/join/synthetic","useSrtp":true}});
+            "vkLink":"https://vk.ru/call/join/synthetic","useSrtp":true,"allowedIPs":"198.51.100.0/24"}});
         let payload = general_purpose::URL_SAFE_NO_PAD.encode(fixture.to_string());
         let uri = format!("vkturnproxy://import?data={payload}");
         let imported = decode_link(&uri).unwrap();
         assert!(imported.transport == Transport::Srtp);
+        assert_eq!(imported.allowed_ips, "198.51.100.0/24");
+        let json = serde_json::to_value(&imported).unwrap();
+        assert_eq!(json["allowedIPs"], "198.51.100.0/24");
+        assert!(json.get("allowedIps").is_none());
         assert!(Tunnel::new(&imported).is_none());
         assert!(decode_link(&format!("{uri}&data={payload}")).is_none());
         assert!(decode_link(&uri.replace("import", "other")).is_none());

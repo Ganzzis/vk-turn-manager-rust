@@ -55,6 +55,9 @@ jobs:
       - name: Package unsigned archive and source notices
         working-directory: ios
         run: |
+          application=build/VKMobile.xcarchive/Products/Applications/VKMobile.app
+          test -f "$application/VKMobile"
+          test -f "$application/PlugIns/PacketTunnel.appex/PacketTunnel"
           mkdir -p build/distribution
           ditto -c -k --keepParent build/VKMobile.xcarchive build/distribution/VKMobile-unsigned.zip
           python3 scripts/notices.py build/distribution/third-party-notices
