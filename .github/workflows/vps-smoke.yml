@@ -2,6 +2,11 @@ name: VPS integration smoke test
 
 on:
   workflow_dispatch:
+    inputs:
+      reboot_confirmation:
+        description: 'Leave blank for read-only smoke. Enter REBOOT DISPOSABLE VPS to also test NAT and reboot.'
+        required: false
+        type: string
 
 permissions:
   contents: read
@@ -13,35 +18,34 @@ concurrency:
 jobs:
   smoke:
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    timeout-minutes: 10
     environment: vps-test
     steps:
       - uses: actions/checkout@v6
       - name: Build test binary
         run: cargo build --locked --release
-      - name: Configure SSH
+      - name: Run read-only smoke checks
         env:
           VPS_HOST: ${{ secrets.VPS_HOST }}
           VPS_USER: ${{ secrets.VPS_USER }}
           VPS_SSH_KEY: ${{ secrets.VPS_SSH_KEY }}
           VPS_KNOWN_HOSTS: ${{ secrets.VPS_KNOWN_HOSTS }}
-        run: |
-          set -euo pipefail
-          test -n "$VPS_HOST" && test -n "$VPS_USER"
-          test -n "$VPS_SSH_KEY" && test -n "$VPS_KNOWN_HOSTS"
-          install -d -m 700 ~/.ssh
-          printf '%s\n' "$VPS_SSH_KEY" > ~/.ssh/id_ed25519
-          chmod 600 ~/.ssh/id_ed25519
-          printf '%s\n' "$VPS_KNOWN_HOSTS" > ~/.ssh/known_hosts
-          chmod 600 ~/.ssh/known_hosts
-          echo "VPS_TARGET=$VPS_USER@$VPS_HOST" >> "$GITHUB_ENV"
-      - name: Upload temporary binary
-        run: |
-          set -euo pipefail
-          scp -o StrictHostKeyChecking=yes -o BatchMode=yes \
-            target/release/vk-turn-manager "$VPS_TARGET:/tmp/vk-turn-manager-smoke"
-      - name: Run read-only smoke checks
-        run: |
-          set -euo pipefail
-          ssh -o StrictHostKeyChecking=yes -o BatchMode=yes "$VPS_TARGET" \
-            'chmod 700 /tmp/vk-turn-manager-smoke && /tmp/vk-turn-manager-smoke network status && /tmp/vk-turn-manager-smoke network plan; result=$?; rm -f /tmp/vk-turn-manager-smoke; exit "$result"'
+        run: bash tests/vps-workflow.sh smoke
+
+  integration:
+    if: inputs.reboot_confirmation == 'REBOOT DISPOSABLE VPS'
+    needs: smoke
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    environment: vps-test
+    steps:
+      - uses: actions/checkout@v6
+      - name: Build test binary
+        run: cargo build --locked --release
+      - name: Test NAT rollback, reboot, and cleanup
+        env:
+          VPS_HOST: ${{ secrets.VPS_HOST }}
+          VPS_USER: ${{ secrets.VPS_USER }}
+          VPS_SSH_KEY: ${{ secrets.VPS_SSH_KEY }}
+          VPS_KNOWN_HOSTS: ${{ secrets.VPS_KNOWN_HOSTS }}
+        run: bash tests/vps-workflow.sh integration

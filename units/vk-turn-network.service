@@ -1,0 +1,13 @@
+[Unit]
+Description=VK TURN Manager IPv4 forwarding and NAT
+Wants=network-online.target
+After=network-online.target nftables.service vk-turn-wireguard.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/sbin/nft -f /etc/vk-turn-network/rules.nft
+ExecStart=/usr/sbin/sysctl -q -w net.ipv4.ip_forward=1
+
+[Install]
+WantedBy=multi-user.target
