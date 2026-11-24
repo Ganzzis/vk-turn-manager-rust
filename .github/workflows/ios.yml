@@ -3,9 +3,9 @@ name: iOS CI
 on:
   push:
     branches: [main]
-    paths: ['ios/**', '.github/workflows/ios.yml']
+    paths: ['ios/**', 'tests/fixtures/upstream-ios-import.url', '.github/workflows/ios.yml']
   pull_request:
-    paths: ['ios/**', '.github/workflows/ios.yml']
+    paths: ['ios/**', 'tests/fixtures/upstream-ios-import.url', '.github/workflows/ios.yml']
   workflow_dispatch:
 
 permissions:
@@ -23,6 +23,8 @@ jobs:
           rustup override set 1.100.0
           if ! command -v xcodegen >/dev/null; then brew install xcodegen; fi
           xcodebuild -version
+      - name: Test signed IPA validation rules with synthetic profiles
+        run: python3 ios/scripts/test-check-signing.py
       - name: Test Rust mobile core
         run: |
           cargo fmt --manifest-path ios/Core/Cargo.toml --all -- --check
