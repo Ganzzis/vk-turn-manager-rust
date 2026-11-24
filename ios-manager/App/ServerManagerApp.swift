@@ -158,10 +158,7 @@ private struct ServerDetail: View {
     @State private var connections: [Connection] = []
     @State private var job: Task<Void, Never>?
     @State private var progress = ""
-    @State private var error = ""
-    @State private var observedKey: HostKey?
-    @State private var confirmation: Confirmation?
-    @State private var addSheet = false
+    @State private var dialog: ServerDialog?
     @State private var peerName = ""
     @State private var profilePeer: Peer?
     @State private var sharedLink: SharedLink?
@@ -218,7 +215,7 @@ private struct ServerDetail: View {
                 if usable {
                     Section("Клиенты") {
                         Button("Добавить клиента", systemImage: "person.badge.plus") {
-                            peerName = ""; addSheet = true
+                            peerName = ""; dialog = .add
                         }.disabled(status?.wireguard != "active")
                         ForEach(peers) { peer in
                             Button {
@@ -290,36 +287,45 @@ private struct ServerDetail: View {
                     .toolbar { Button("Готово") { self.journal = nil } }
             }
         }
-        .alert("Добавить клиента", isPresented: $addSheet) {
-            TextField("Например, phone", text: $peerName).textInputAutocapitalization(.never)
-            Button("Отмена", role: .cancel) {}
-            Button("Добавить") {
-                let name = peerName
-                run("Добавление клиента") { manager in
-                    try await manager.changePeer(name)
-                    try await load(manager)
+        .alert(dialog?.title ?? "Сервер",
+               isPresented: Binding(get: { dialog != nil }, set: { if !$0 { dialog = nil } }),
+               presenting: dialog) { dialog in
+            switch dialog {
+            case .add:
+                TextField("Например, phone", text: $peerName).textInputAutocapitalization(.never)
+                Button("Отмена", role: .cancel) {}
+                Button("Добавить") {
+                    let name = peerName
+                    run("Добавление клиента") { manager in
+                        try await manager.changePeer(name)
+                        try await load(manager)
+                    }
                 }
+            case .confirm(_, let action):
+                Button("Подтвердить", role: .destructive, action: action)
+                Button("Отмена", role: .cancel) {}
+            case .trust(let key):
+                Button("Отпечаток совпадает") { trust(key) }
+                Button("Отмена", role: .cancel) {}
+            case .failure:
+                Button("Закрыть", role: .cancel) {}
+            }
+        } message: { dialog in
+            switch dialog {
+            case .trust(let key): Text("Сверьте с консолью провайдера.\n\n\(key.fingerprint)")
+            case .failure(let error): Text(error)
+            default: EmptyView()
             }
         }
-        .alert(item: $confirmation) { prompt in
-            Alert(title: Text(prompt.title), primaryButton: .destructive(Text("Подтвердить"), action: prompt.action),
-                  secondaryButton: .cancel(Text("Отмена")))
-        }
-        .alert(item: $observedKey) { key in
-            Alert(title: Text("Проверка ключа SSH"),
-                  message: Text("Сверьте с консолью провайдера.\n\n\(key.fingerprint)"),
-                  primaryButton: .default(Text("Отпечаток совпадает")) {
-                      guard var stored = server else { return }
-                      do {
-                          stored.hostKey = key.fingerprint
-                          try vault.save(stored, credentials: vault.credentials(id))
-                          refresh()
-                      } catch { self.error = message(error) }
-                  }, secondaryButton: .cancel(Text("Отмена")))
-        }
-        .alert("Сервер", isPresented: Binding(get: { !error.isEmpty }, set: { if !$0 { error = "" } })) {
-            Button("Закрыть", role: .cancel) { error = "" }
-        } message: { Text(error) }
+    }
+
+    private func trust(_ key: HostKey) {
+        guard var stored = server else { return }
+        do {
+            stored.hostKey = key.fingerprint
+            try vault.save(stored, credentials: vault.credentials(id))
+            refresh()
+        } catch { dialog = .failure(message(error)) }
     }
 
     private func run(_ title: String, operation: @escaping @MainActor (Manager) async throws -> Void) {
@@ -328,9 +334,9 @@ private struct ServerDetail: View {
         job = Task { @MainActor in
             defer { job = nil }
             do { try await operation(Manager(server: server, credentials: vault.credentials(id))) }
-            catch ManagerError.hostKeyRequired(let key) { observedKey = key }
+            catch ManagerError.hostKeyRequired(let key) { dialog = .trust(key) }
             catch is CancellationError { progress = ""; status = nil }
-            catch { self.error = message(error) }
+            catch { dialog = .failure(message(error)) }
         }
     }
 
@@ -365,7 +371,7 @@ private struct ServerDetail: View {
     }
 
     private func confirm(_ title: String, _ action: @escaping () -> Void) {
-        confirmation = Confirmation(title: title, action: action)
+        dialog = .confirm(title, action)
     }
 
     private func bytes(_ count: UInt64) -> String {
@@ -381,10 +387,20 @@ private struct ServerDetail: View {
     }
 }
 
-private struct Confirmation: Identifiable {
-    let id = UUID()
-    let title: String
-    let action: () -> Void
+private enum ServerDialog {
+    case add
+    case confirm(String, () -> Void)
+    case trust(HostKey)
+    case failure(String)
+
+    var title: String {
+        switch self {
+        case .add: return "Добавить клиента"
+        case .confirm(let title, _): return title
+        case .trust: return "Проверка ключа SSH"
+        case .failure: return "Сервер"
+        }
+    }
 }
 
 private struct Journal: Identifiable {

@@ -3,7 +3,7 @@ import PackageDescription
 
 let package = Package(
     name: "ServerManager",
-    platforms: [.iOS(.v17), .macOS(.v15)],
+    platforms: [.iOS(.v17), .macOS("15.0")],
     products: [.library(name: "ManagerCore", targets: ["ManagerCore"])],
     dependencies: [
         .package(url: "https://github.com/orlandos-nl/Citadel", exact: "0.12.1"),
