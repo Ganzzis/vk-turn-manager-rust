@@ -1,7 +1,7 @@
 use crate::{lock_clients, output, Result, CONFIG};
 use serde_json::{json, Value};
 use std::fs::{self, DirBuilder, File};
-use std::io::{self, Write};
+use std::io::{self, Read, Write};
 use std::net::{IpAddr, Ipv4Addr};
 use std::os::unix::fs::{DirBuilderExt, MetadataExt};
 use std::path::{Path, PathBuf};
@@ -39,6 +39,35 @@ fn ipv4_range(cidr: &str) -> Result<Option<Range>> {
         IpAddr::V6(_) if bits <= 128 => Ok(None),
         _ => Err("Invalid peer prefix length".into()),
     }
+}
+
+pub(super) fn check_setup_subnet() -> Result<()> {
+    let routes = output("ip", &["-j", "-4", "route", "show", "table", "all"])?;
+    if !routes.status.success() {
+        return Err("Не удалось проверить существующие IPv4-маршруты".into());
+    }
+    let routes: Vec<Value> = serde_json::from_slice(&routes.stdout)?;
+    let candidate = ipv4_range("10.77.0.0/24")?.unwrap();
+    for dst in routes.iter().filter_map(|route| route["dst"].as_str()) {
+        if matches!(dst, "default" | "0.0.0.0/0") {
+            continue;
+        }
+        let host;
+        let cidr = if dst.contains('/') {
+            dst
+        } else {
+            host = format!("{dst}/32");
+            &host
+        };
+        if ipv4_range(cidr)?
+            .is_some_and(|route| route.first <= candidate.last && candidate.first <= route.last)
+        {
+            return Err(
+                "Подсеть 10.77.0.0/24 занята. Используйте install со своим wg-vk.conf".into(),
+            );
+        }
+    }
+    Ok(())
 }
 
 fn allocate(subnet: Range, server: Ipv4Addr, mut used: Vec<Range>) -> Result<Ipv4Addr> {
@@ -351,19 +380,19 @@ fn apply(peer: &Peer, add: bool) -> Result<()> {
     Ok(())
 }
 
-fn stage(path: &Path, content: &str) -> Result<NamedTempFile> {
+fn stage(path: &Path, content: &[u8]) -> Result<NamedTempFile> {
     let parent = path
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
         .unwrap_or(Path::new("."));
     let mut file = NamedTempFile::new_in(parent)?;
-    file.write_all(content.as_bytes())?;
+    file.write_all(content)?;
     file.as_file().sync_all()?;
     Ok(file)
 }
 
 fn write_export(path: &Path, content: &str) -> Result<()> {
-    stage(path, content)?
+    stage(path, content.as_bytes())?
         .persist_noclobber(path)
         .map_err(|error| error.error)?;
     Ok(())
@@ -393,7 +422,7 @@ fn update(
 ) -> Result<()> {
     let path = Path::new(config.path);
     let original = private_file(path, true)?.metadata()?;
-    let staged = stage(path, replacement)?;
+    let staged = stage(path, replacement.as_bytes())?;
     std::os::unix::fs::chown(staged.path(), None, Some(original.gid()))?;
     use std::os::unix::fs::PermissionsExt;
     staged
@@ -562,7 +591,55 @@ fn export(
     Ok(json!({"name": name, "format": format, "written": true}))
 }
 
+pub(super) fn qr(source: &Path, target: &Path) -> Result<Value> {
+    let mut link = String::new();
+    private_file(source, false)?
+        .take(4097)
+        .read_to_string(&mut link)?;
+    let payload = link.trim().strip_prefix("vkturnproxy://import?data=");
+    if link.len() > 4096
+        || !payload.is_some_and(|data| {
+            !data.is_empty()
+                && data
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || b"-_".contains(&byte))
+        })
+    {
+        return Err("Ожидается ссылка VK TURN Proxy, созданная командой client export".into());
+    }
+    let mut encoder = Command::new("qrencode")
+        .args(["-t", "PNG", "-o", "-"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()?;
+    let written = encoder
+        .stdin
+        .take()
+        .ok_or("No QR input pipe")?
+        .write_all(link.trim().as_bytes());
+    let result = encoder.wait_with_output()?;
+    written?;
+    if !result.status.success() || !result.stdout.starts_with(b"\x89PNG\r\n\x1a\n") {
+        return Err("Не удалось создать QR-код. Проверьте ссылку и наличие qrencode".into());
+    }
+    stage(target, &result.stdout)?
+        .persist_noclobber(target)
+        .map_err(|error| error.error)?;
+    Ok(json!({"format": "png", "written": true}))
+}
+
 pub fn command(args: &[std::ffi::OsString]) -> Result<()> {
+    println!("{}", execute(args)?);
+    Ok(())
+}
+
+pub(super) fn execute(args: &[std::ffi::OsString]) -> Result<Value> {
+    if let [cmd, source, flag, target] = args {
+        if cmd == "qr" && flag == "--output" {
+            return qr(Path::new(source), Path::new(target));
+        }
+    }
     let _lock = lock_clients()?;
     fn argument(arg: &std::ffi::OsStr) -> std::result::Result<&str, &'static str> {
         arg.to_str().ok_or("Expected a UTF-8 command argument")
@@ -612,8 +689,7 @@ pub fn command(args: &[std::ffi::OsString]) -> Result<()> {
         }
         _ => return Err("Invalid client command; see vk-turn-manager --help".into()),
     };
-    println!("{result}");
-    Ok(())
+    Ok(result)
 }
 
 #[cfg(test)]

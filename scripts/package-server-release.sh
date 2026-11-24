@@ -41,7 +41,7 @@ trap 'rm -rf "$stage"' EXIT
 name="vk-turn-manager-v$version-linux-$arch"
 install -d -m 0755 "$stage/$name"
 install -m 0755 "$binary" "$stage/$name/vk-turn-manager"
-install -m 0644 LICENSE README.md CHANGELOG.md "$stage/$name"
+install -m 0644 LICENSE README.md CHANGELOG.md install.sh "$stage/$name"
 tar --format=gnu --sort=name --mtime="@$SOURCE_DATE_EPOCH" \
   --owner=0 --group=0 --numeric-owner -C "$stage" -cf - "$name" |
   gzip -n > "$stage/$name.tar.gz"

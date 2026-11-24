@@ -270,6 +270,10 @@ fn remove_files() -> Result<()> {
 
 pub fn enable() -> Result<()> {
     let _lock = lock()?;
+    enable_locked()
+}
+
+pub(crate) fn enable_locked() -> Result<()> {
     let (interface, subnet) = topology()?;
     let desired = rules(&interface, &subnet);
     let current = table()?;
