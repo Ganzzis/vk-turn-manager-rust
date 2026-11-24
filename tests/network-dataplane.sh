@@ -37,7 +37,8 @@ sudo ip -n "$ns" link set vk-ci-peer up
 sudo ip -n "$ns" link set lo up
 
 sudo ip -n "$ns" link add vk-ci-wg type wireguard
-sudo ip netns exec "$ns" wg set vk-ci-wg private-key "$scratch/client.key" \
+# Keep the key file outside the namespace; pass it through an anonymous pipe.
+cat "$scratch/client.key" | sudo ip netns exec "$ns" wg set vk-ci-wg private-key /dev/stdin \
   peer "$server_public" allowed-ips 10.0.2.2/32 endpoint "$endpoint"
 sudo ip -n "$ns" address add "$client_address" dev vk-ci-wg
 sudo ip -n "$ns" link set vk-ci-wg up

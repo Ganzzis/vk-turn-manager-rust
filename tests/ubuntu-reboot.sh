@@ -27,8 +27,9 @@ cleanup() {
   if [[ -n ${http_pid:-} ]]; then
     kill "$http_pid" 2>/dev/null || true
   fi
-  if [[ -s $scratch/qemu.pid ]]; then
-    sudo kill "$(cat "$scratch/qemu.pid")" 2>/dev/null || true
+  local vm_pid
+  if vm_pid=$(sudo cat "$scratch/qemu.pid" 2>/dev/null) && [[ $vm_pid =~ ^[0-9]+$ ]]; then
+    sudo kill "$vm_pid" 2>/dev/null || true
   fi
   rm -rf "$scratch"
 }
