@@ -3,6 +3,7 @@
 set -euo pipefail
 umask 077
 scratch=$(mktemp -d)
+root_scratch=
 ns=vk-ci-client
 server_link=vk-ci-host
 cleanup() {
@@ -11,6 +12,7 @@ cleanup() {
   fi
   sudo ip link delete "$server_link" 2>/dev/null || true
   sudo ip netns delete "$ns" 2>/dev/null || true
+  if [[ -n $root_scratch ]]; then sudo rm -rf -- "$root_scratch"; fi
   rm -rf "$scratch"
 }
 trap cleanup EXIT
@@ -36,14 +38,20 @@ sudo ip -n "$ns" address add 192.0.2.2/30 dev vk-ci-peer
 sudo ip -n "$ns" link set vk-ci-peer up
 sudo ip -n "$ns" link set lo up
 
-sudo ip -n "$ns" link add vk-ci-wg type wireguard
-sudo ip netns exec "$ns" wg set vk-ci-wg private-key "$scratch/client.key" \
-  peer "$server_public" allowed-ips 10.0.2.2/32 endpoint "$endpoint"
-sudo ip -n "$ns" address add "$client_address" dev vk-ci-wg
-sudo ip -n "$ns" link set vk-ci-wg up
+# Use the same wg-quick configuration path as the server, including its
+# handling of private key input on Ubuntu 26.04.
+{
+  printf '[Interface]\nPrivateKey = '
+  tr -d '\n' < "$scratch/client.key"
+  printf '\nAddress = %s\nTable = off\n' "$client_address"
+  printf '[Peer]\nPublicKey = %s\nAllowedIPs = 10.0.2.2/32\nEndpoint = %s\n' "$server_public" "$endpoint"
+} > "$scratch/vk-ci-wg.conf"
+root_scratch=$(sudo mktemp -d /run/vk-ci-wireguard.XXXXXXXX)
+sudo install -m 0600 "$scratch/vk-ci-wg.conf" "$root_scratch/vk-ci-wg.conf"
+sudo nsenter --net="/run/netns/$ns" -- /bin/bash /usr/bin/wg-quick up "$root_scratch/vk-ci-wg.conf"
 sudo ip -n "$ns" route add 10.0.2.2/32 dev vk-ci-wg
 if [[ ${WG_EXPECT_DENIED:-0} == 1 ]]; then
-  if sudo ip netns exec "$ns" curl --noproxy '*' --fail --silent \
+  if sudo nsenter --net="/run/netns/$ns" -- curl --noproxy '*' --fail --silent \
     --connect-timeout 3 --max-time 5 http://10.0.2.2:18080/nat-probe >/dev/null; then
     echo 'Revoked WireGuard client still reached the HTTP peer.' >&2
     exit 1
@@ -51,7 +59,7 @@ if [[ ${WG_EXPECT_DENIED:-0} == 1 ]]; then
   echo 'Revoked WireGuard client could no longer reach the HTTP peer.'
   exit 0
 fi
-reply=$(sudo ip netns exec "$ns" curl --noproxy '*' --fail --silent --show-error \
+reply=$(sudo nsenter --net="/run/netns/$ns" -- curl --noproxy '*' --fail --silent --show-error \
   --connect-timeout 10 --max-time 20 http://10.0.2.2:18080/nat-probe)
 [[ $reply == 'vk-turn-manager-nat-probe' ]]
 sudo nft list chain ip vk_turn_manager postrouting | grep -E 'counter packets [1-9][0-9]* bytes .* masquerade'

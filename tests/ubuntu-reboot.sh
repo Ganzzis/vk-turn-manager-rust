@@ -3,8 +3,15 @@ set -euo pipefail
 
 manager=$(realpath "${1:?Supply the release binary path}")
 scratch=$(mktemp -d)
-image=noble-server-cloudimg-amd64.img
-release=https://cloud-images.ubuntu.com/noble/current
+version=${2:-24.04}
+case "$version" in
+  24.04) series=noble ;;
+  26.04) series=resolute ;;
+  *) echo 'Expected Ubuntu 24.04 or 26.04' >&2; exit 2 ;;
+esac
+image=ubuntu-$version-server-cloudimg-amd64.img
+release=https://cloud-images.ubuntu.com/releases/$series/release
+root=$(cd "$(dirname "$0")/.." && pwd)
 port=2222
 ssh_opts=(-i "$scratch/id_ed25519" -o BatchMode=yes -o ConnectTimeout=5
   -o StrictHostKeyChecking=accept-new -o "UserKnownHostsFile=$scratch/known_hosts")
@@ -20,15 +27,19 @@ cleanup() {
   if [[ -n ${http_pid:-} ]]; then
     kill "$http_pid" 2>/dev/null || true
   fi
-  if [[ -s $scratch/qemu.pid ]]; then
-    sudo kill "$(cat "$scratch/qemu.pid")" 2>/dev/null || true
+  local vm_pid
+  if vm_pid=$(sudo cat "$scratch/qemu.pid" 2>/dev/null) && [[ $vm_pid =~ ^[0-9]+$ ]]; then
+    sudo kill "$vm_pid" 2>/dev/null || true
   fi
   rm -rf "$scratch"
 }
 trap cleanup EXIT
 
-curl --fail --silent --show-error --location --retry 2 "$release/SHA256SUMS" -o "$scratch/SHA256SUMS"
-curl --fail --silent --show-error --location --retry 2 "$release/$image" -o "$scratch/$image"
+download=(curl --fail --silent --show-error --location --retry 2 --connect-timeout 15
+  --max-time 150 --retry-max-time 330 --speed-time 30 --speed-limit 10240)
+echo "Downloading Ubuntu $version cloud image"
+"${download[@]}" "$release/SHA256SUMS" -o "$scratch/SHA256SUMS"
+"${download[@]}" "$release/$image" -o "$scratch/$image"
 (
   cd "$scratch"
   awk -v target="$image" '{name=$2; sub(/^\*/, "", name); if (name==target) print $1 "  " target}' SHA256SUMS |
@@ -49,9 +60,12 @@ printf '%s\n' 'vk-turn-manager-nat-probe' > "$scratch/http/nat-probe"
 python3 -m http.server 18080 --bind 127.0.0.1 --directory "$scratch/http" > "$scratch/http.log" 2>&1 &
 http_pid=$!
 touch "$scratch/serial.log"
+cp /usr/share/OVMF/OVMF_VARS_4M.fd "$scratch/OVMF_VARS.fd"
 sudo qemu-system-x86_64 -daemonize -pidfile "$scratch/qemu.pid" \
   -machine accel=kvm:tcg -cpu max -smp 2 -m 2048 -display none \
   -serial "file:$scratch/serial.log" \
+  -drive if=pflash,format=raw,readonly=on,file=/usr/share/OVMF/OVMF_CODE_4M.fd \
+  -drive "if=pflash,format=raw,file=$scratch/OVMF_VARS.fd" \
   -drive "if=virtio,format=qcow2,file=$scratch/$image" \
   -drive "if=virtio,format=raw,readonly=on,file=$scratch/seed.img" \
   -nic "user,model=virtio-net-pci,hostfwd=tcp:127.0.0.1:$port-:22"
@@ -70,24 +84,28 @@ wait_for_boot() {
   return 1
 }
 
+echo "Waiting for first boot of Ubuntu $version"
 before=$(wait_for_boot)
-remote 'cloud-init status --wait && grep -x VERSION_ID=\"24.04\" /etc/os-release'
-scp "${ssh_opts[@]}" -P "$port" "$manager" ubuntu@127.0.0.1:vk-turn-manager
-scp "${ssh_opts[@]}" -P "$port" "$(dirname "$0")/network-integration.sh"   "$(dirname "$0")/network-dataplane.sh" "$(dirname "$0")/client-lifecycle.sh" ubuntu@127.0.0.1:~/
+remote "cloud-init status --wait && grep -x 'VERSION_ID=\"$version\"' /etc/os-release"
+cli_version=$("$manager" --version)
+archive="vk-turn-manager-v${cli_version##* }-linux-amd64"
+mkdir "$scratch/$archive"
+install -m 0755 "$manager" "$scratch/$archive/vk-turn-manager"
+tar -czf "$scratch/$archive.tar.gz" -C "$scratch" "$archive"
+(cd "$scratch" && sha256sum "$archive.tar.gz" > SHA256SUMS)
+scp "${ssh_opts[@]}" -P "$port" "$scratch/$archive.tar.gz" "$scratch/SHA256SUMS" "$root/install.sh" \
+  "$root/tests/network-integration.sh" "$root/tests/network-dataplane.sh" "$root/tests/client-lifecycle.sh" ubuntu@127.0.0.1:~/
 remote 'bash -se' <<'GUEST'
-sudo apt-get update
-sudo apt-get install -y --no-install-recommends wireguard-tools nftables
-sudo modprobe wireguard
-umask 077
-{
-  printf '[Interface]\nPrivateKey = '
-  wg genkey
-  printf 'Address = 10.240.42.1/24\nListenPort = 51820\nTable = off\n'
-} > wg-vk.conf
-chmod +x vk-turn-manager
-sudo ./vk-turn-manager install wg-vk.conf
+sudo bash install.sh install v0.3.0 "$PWD"
+ln -s /usr/local/bin/vk-turn-manager vk-turn-manager
 sudo ./vk-turn-manager status
+sudo ./vk-turn-manager connections
+sudo ./vk-turn-manager logs
 sudo systemctl is-enabled --quiet vk-turn-srtp.service
+sudo systemctl is-active --quiet vk-turn-network.service
+sudo ./vk-turn-manager network disable
+sudo sysctl -q -w net.ipv4.ip_forward=0
+sudo apt-get install -y --no-install-recommends zbar-tools
 
 # Test VM only: a persistent legacy table with its own forwarding hook.
 sudo tee /etc/vk-ci-legacy.nft >/dev/null <<'RULES'
@@ -112,11 +130,43 @@ UNIT
 sudo systemctl daemon-reload
 sudo systemctl enable --now vkturn-nft.service
 bash network-integration.sh prepare
-bash client-lifecycle.sh prepare
+WG_TEST_NETWORK=10.77.0 WG_TEST_QR=1 bash client-lifecycle.sh prepare
+
+wg_invocation=$(systemctl show -p InvocationID --value vk-turn-wireguard.service)
+sudo sha256sum /etc/vk-turn-manager/wg-vk.conf /var/lib/vk-turn-clients/ci-alpha > before-update.sha256
+sudo bash install.sh update v0.3.0 "$PWD"
+sudo sha256sum --status -c before-update.sha256
+test "$(systemctl show -p InvocationID --value vk-turn-wireguard.service)" = "$wg_invocation"
+
+mkdir update-fixture
+cat > update-fixture/systemctl <<'WRAPPER'
+#!/usr/bin/env bash
+set -euo pipefail
+if [[ $* == 'restart vk-turn-srtp.service' && ! -e $VK_RESTART_FIXTURE ]]; then
+  touch "$VK_RESTART_FIXTURE"
+  exit 42
+fi
+exec /usr/bin/systemctl "$@"
+WRAPPER
+chmod 0755 update-fixture/systemctl
+server=/etc/vk-turn-manager/server
+before=$(stat -c %i "$server")
+if sudo env "PATH=$PWD/update-fixture:$PATH" "VK_RESTART_FIXTURE=$PWD/update-fixture/failed" ./vk-turn-manager reinstall; then
+  echo 'Injected SRTP restart failure was ignored.' >&2
+  exit 1
+fi
+sudo test -f update-fixture/failed
+test "$(stat -c %i "$server")" = "$before"
+sudo sha256sum --status -c before-update.sha256
+sudo systemctl is-active --quiet vk-turn-srtp.service
+printf '3\n0\n' | sudo ./vk-turn-manager menu | grep 'ci-alpha'
+
 GUEST
 
 echo "Rebooting Ubuntu VM, original boot ID: $before"
-remote 'sudo systemctl reboot --no-block'
+# Flush the disposable guest's disk and reboot without waiting for unrelated
+# cloud-image services to shut down. The new boot ID still verifies a real reboot.
+remote 'sudo sync && sudo systemctl reboot --force --no-block' || [[ $? == 255 ]]
 after=$(wait_for_boot "$before")
 echo "Ubuntu VM rebooted, new boot ID: $after"
 
@@ -136,7 +186,10 @@ sudo journalctl -b -u vk-turn-wireguard.service -u vk-turn-srtp.service --no-pag
 exit 1
 GUEST
 
-remote 'bash client-lifecycle.sh finish && bash network-integration.sh finish && sudo systemctl is-active --quiet vkturn-nft.service'
+echo "Verifying WireGuard traffic and client revocation after reboot"
+remote 'timeout 90s bash client-lifecycle.sh finish'
+echo "Verifying NAT persistence and uninstall"
+remote 'timeout 90s bash network-integration.sh finish && sudo systemctl is-active --quiet vkturn-nft.service'
 remote 'sudo ./vk-turn-manager network enable && sudo ./vk-turn-manager uninstall &&
   sudo test ! -e /etc/vk-turn-network && sudo systemctl is-active --quiet vkturn-nft.service &&
   sudo nft list table ip vkturn >/dev/null'

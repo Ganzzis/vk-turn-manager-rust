@@ -1,4 +1,5 @@
 mod client;
+mod menu;
 mod network;
 
 use std::env;
@@ -130,7 +131,7 @@ fn release_asset(architecture: &str) -> Result<(&'static str, &'static str)> {
     }
 }
 
-fn install_server(asset: &str, checksum: &str) -> Result<()> {
+fn download_server(asset: &str, checksum: &str, target: &str) -> Result<()> {
     run(
         "curl",
         &[
@@ -148,13 +149,13 @@ fn install_server(asset: &str, checksum: &str) -> Result<()> {
             "--max-time",
             "120",
             "--output",
-            SERVER,
+            target,
             &format!("{RELEASE}/{asset}"),
         ],
     )?;
-    let digest = output("sha256sum", &[SERVER])?;
+    let digest = output("sha256sum", &[target])?;
     verify_digest(&digest, checksum)?;
-    fs::set_permissions(SERVER, fs::Permissions::from_mode(0o755))?;
+    fs::set_permissions(target, fs::Permissions::from_mode(0o755))?;
     Ok(())
 }
 
@@ -241,6 +242,10 @@ fn write_new(path: &str, mode: u32, bytes: &[u8]) -> Result<()> {
 fn enable_and_verify() -> Result<()> {
     systemctl(&["daemon-reload"])?;
     systemctl(&["enable", "--now", SRTP])?;
+    verify_services()
+}
+
+fn verify_services() -> Result<()> {
     let port = output("wg", &["show", "wg-vk", "listen-port"])?;
     if !port.status.success() || port.stdout != b"51820\n" {
         return Err("WireGuard wg-vk did not start on UDP 51820".into());
@@ -264,9 +269,19 @@ fn enable_and_verify() -> Result<()> {
 
 fn install(source: &Path) -> Result<()> {
     let _lock = lock()?;
-    let config = fs::read_to_string(source)
-        .map_err(|err| format!("Could not read {}: {err}", source.display()))?;
-    validate_config(&config)?;
+    install_locked(Some(source))
+}
+
+fn install_locked(source: Option<&Path>) -> Result<()> {
+    let config = source
+        .map(|path| {
+            fs::read_to_string(path)
+                .map_err(|err| format!("Could not read {}: {err}", path.display()))
+        })
+        .transpose()?;
+    if let Some(config) = &config {
+        validate_config(config)?;
+    }
     let (asset, checksum) = release_asset(env::consts::ARCH)?;
     require_absent(STATE)?;
     require_absent("/etc/wireguard/wg-vk.conf")?;
@@ -276,19 +291,35 @@ fn install(source: &Path) -> Result<()> {
     require_absent("/sys/class/net/wg-vk")?;
 
     run("apt-get", &["update"])?;
-    run(
-        "apt-get",
-        &[
-            "install",
-            "-y",
-            "--no-install-recommends",
-            "wireguard-tools",
-            "iproute2",
-            "curl",
-            "ca-certificates",
-        ],
-    )?;
+    let mut packages = vec![
+        "install",
+        "-y",
+        "--no-install-recommends",
+        "wireguard-tools",
+        "iproute2",
+        "curl",
+        "ca-certificates",
+        "qrencode",
+    ];
+    if source.is_none() {
+        packages.push("nftables");
+    }
+    run("apt-get", &packages)?;
     check_network_free()?;
+    let config = match config {
+        Some(config) => config,
+        None => {
+            client::check_setup_subnet()?;
+            let private = output("wg", &["genkey"])?;
+            if !private.status.success() {
+                return Err("Не удалось создать ключ WireGuard".into());
+            }
+            format!(
+                "[Interface]\nPrivateKey = {}\nAddress = 10.77.0.1/24\nListenPort = 51820\nTable = off\n",
+                std::str::from_utf8(&private.stdout)?.trim()
+            )
+        }
+    };
 
     DirBuilder::new().mode(0o755).create(STATE)?;
     let mut installed = Vec::new();
@@ -297,7 +328,7 @@ fn install(source: &Path) -> Result<()> {
         fs::set_permissions(STATE, fs::Permissions::from_mode(0o755))?;
         write_new(MARKER, 0o644, MARKER_CONTENT)?;
         write_new(CONFIG, 0o600, config.as_bytes())?;
-        install_server(asset, checksum)?;
+        download_server(asset, checksum, SERVER)?;
         for (unit, text) in [(WG, WG_UNIT), (SRTP, SRTP_UNIT)] {
             let path = unit_path(unit);
             let mut file = OpenOptions::new()
@@ -322,6 +353,84 @@ fn install(source: &Path) -> Result<()> {
     }
     println!("Installed: wg-vk UDP 51820, SRTP UDP 56004 -> 127.0.0.1:51820");
     Ok(())
+}
+
+fn setup() -> Result<()> {
+    let _lock = lock()?;
+    install_locked(None)?;
+    network::enable_locked().map_err(|error| {
+        format!("Сервер установлен. Не удалось включить NAT: {error}. Проверьте network plan и повторите network enable.").into()
+    })
+}
+
+fn reinstall() -> Result<()> {
+    let _lock = lock()?;
+    if !fs::symlink_metadata(STATE)?.is_dir()
+        || !fs::symlink_metadata(MARKER)?.is_file()
+        || fs::read(MARKER)? != MARKER_CONTENT
+        || !fs::symlink_metadata(SERVER)?.is_file()
+        || !owns_unit(WG, WG_UNIT)?
+        || !owns_unit(SRTP, SRTP_UNIT)?
+    {
+        return Err("Обновление доступно для управляемой установки с исходными юнитами".into());
+    }
+    let (asset, checksum) = release_asset(env::consts::ARCH)?;
+    let stage = tempfile::tempdir_in(STATE)?;
+    let candidate = stage.path().join("candidate");
+    let previous = stage.path().join("previous");
+    download_server(
+        asset,
+        checksum,
+        candidate.to_str().ok_or("Invalid staging path")?,
+    )?;
+    fs::hard_link(SERVER, &previous)?;
+    fs::rename(candidate, SERVER)?;
+    let restart = || systemctl(&["restart", SRTP]).and_then(|()| verify_services());
+    if let Err(error) = restart() {
+        if let Err(rollback) = fs::rename(&previous, SERVER) {
+            let recovery = stage.keep();
+            return Err(format!(
+                "{error}. Откат не удался: {rollback}. Резервная копия: {}",
+                recovery.join("previous").display()
+            )
+            .into());
+        }
+        restart().map_err(|rollback| {
+            format!("{error}. Прежний бинарник восстановлен, но служба не запустилась: {rollback}")
+        })?;
+        return Err(format!("{error}. Прежний бинарник восстановлен.").into());
+    }
+    println!("SRTP переустановлен. Конфигурация и клиенты сохранены.");
+    Ok(())
+}
+
+fn status() -> Result<()> {
+    systemctl(&["--no-pager", "--full", "status", WG, SRTP])
+}
+
+fn connections() -> Result<()> {
+    run("wg", &["show", "wg-vk", "endpoints"])?;
+    println!("Последнее рукопожатие (Unix, 0 — отсутствует):");
+    run("wg", &["show", "wg-vk", "latest-handshakes"])?;
+    println!("Принято и отправлено байт:");
+    run("wg", &["show", "wg-vk", "transfer"])
+}
+
+fn logs() -> Result<()> {
+    run(
+        "journalctl",
+        &[
+            "--no-pager",
+            "-n",
+            "100",
+            "-u",
+            WG,
+            "-u",
+            SRTP,
+            "-u",
+            "vk-turn-network.service",
+        ],
+    )
 }
 
 fn delete_file(path: &str) -> Result<()> {
@@ -409,10 +518,14 @@ fn uninstall() -> Result<()> {
 fn main() -> ExitCode {
     let args: Vec<_> = env::args_os().skip(1).collect();
     let result = match args.as_slice() {
+        [] if std::io::IsTerminal::is_terminal(&io::stdin()) => menu::run(),
+        [command] if command == "menu" => menu::run(),
+        [command] if command == "setup" => setup(),
         [command, source] if command == "install" => install(Path::new(source)),
-        [command] if command == "status" => {
-            systemctl(&["--no-pager", "--full", "status", WG, SRTP])
-        }
+        [command] if command == "status" => status(),
+        [command] if command == "connections" => connections(),
+        [command] if command == "logs" => logs(),
+        [command] if command == "update" || command == "reinstall" => reinstall(),
         [command] if command == "uninstall" => uninstall(),
         [command, subcommand] if command == "network" && subcommand == "status" => {
             network::status()
@@ -448,7 +561,7 @@ fn main() -> ExitCode {
 }
 
 fn usage() {
-    eprintln!("Usage:\n  vk-turn-manager --version\n  vk-turn-manager install <wg-config-file>\n  vk-turn-manager status\n  vk-turn-manager uninstall\n  vk-turn-manager network status\n  vk-turn-manager network plan\n  vk-turn-manager network enable\n  vk-turn-manager network disable\n  vk-turn-manager client add NAME\n  vk-turn-manager client list\n  vk-turn-manager client remove NAME\n  vk-turn-manager client export NAME --wg-endpoint HOST:PORT --output FILE\n  vk-turn-manager client export NAME --srtp-endpoint HOST:PORT --vk-link-file FILE --output FILE");
+    eprintln!("Usage:\n  vk-turn-manager menu | setup | connections | logs | update | reinstall\n  vk-turn-manager client qr LINK_FILE --output PNG\n  vk-turn-manager --version\n  vk-turn-manager install <wg-config-file>\n  vk-turn-manager status\n  vk-turn-manager uninstall\n  vk-turn-manager network status\n  vk-turn-manager network plan\n  vk-turn-manager network enable\n  vk-turn-manager network disable\n  vk-turn-manager client add NAME\n  vk-turn-manager client list\n  vk-turn-manager client remove NAME\n  vk-turn-manager client export NAME --wg-endpoint HOST:PORT --output FILE\n  vk-turn-manager client export NAME --srtp-endpoint HOST:PORT --vk-link-file FILE --output FILE");
 }
 
 #[cfg(test)]

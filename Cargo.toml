@@ -4,7 +4,7 @@ version = "0.3.0"
 edition = "2021"
 rust-version = "1.89"
 license = "MIT"
-description = "Ubuntu 24.04 installer for VK TURN Proxy SRTP and WireGuard"
+description = "Ubuntu 24.04 and 26.04 installer for VK TURN Proxy SRTP and WireGuard"
 
 [dependencies]
 base64 = "0.22"

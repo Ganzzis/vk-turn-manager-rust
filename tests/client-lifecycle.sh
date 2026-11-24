@@ -6,6 +6,7 @@ cd "$(dirname "$0")"
 binary=$PWD/vk-turn-manager
 scratch=$PWD/.client-test
 config=/etc/vk-turn-manager/wg-vk.conf
+network=${WG_TEST_NETWORK:-10.240.42}
 client() { sudo -n "$binary" client "$@"; }
 
 case "${1:?prepare or finish}" in
@@ -13,9 +14,9 @@ case "${1:?prepare or finish}" in
     mkdir "$scratch"
     sudo wg genkey | wg pubkey > "$scratch/unmanaged.pub"
     pub=$(cat "$scratch/unmanaged.pub")
-    printf '\n[Peer]\n# Synthetic unmanaged peer\nPublicKey = %s\nAllowedIPs = 10.240.42.2/31\n' "$pub" |
+    printf '\n[Peer]\n# Synthetic unmanaged peer\nPublicKey = %s\nAllowedIPs = %s.2/31\n' "$pub" "$network" |
       sudo tee -a "$config" >/dev/null
-    sudo wg set wg-vk peer "$pub" allowed-ips 10.240.42.2/31
+    sudo wg set wg-vk peer "$pub" allowed-ips "$network.2/31"
     sudo sha256sum "$config" > "$scratch/baseline"
     sudo wg show wg-vk allowed-ips > "$scratch/runtime-baseline"
 
@@ -58,7 +59,7 @@ WG
 
     wg genkey | wg pubkey > "$scratch/runtime-only.pub"
     runtime_only=$(cat "$scratch/runtime-only.pub")
-    sudo wg set wg-vk peer "$runtime_only" allowed-ips 10.240.42.4/32
+    sudo wg set wg-vk peer "$runtime_only" allowed-ips "$network.4/32"
 
     client add ci-alpha > "$scratch/alpha.json" &
     alpha=$!
@@ -72,11 +73,11 @@ WG
     fi
     grep -q 'Client name already exists' "$scratch/error"
     client list > "$scratch/list.json"
-    python3 - "$scratch/list.json" <<'PY'
+    python3 - "$scratch/list.json" "$network" <<'PY'
 import json, sys
 with open(sys.argv[1]) as f: peers = json.load(f)
 assert {peer['name'] for peer in peers} == {'ci-alpha', 'ci-beta'}
-assert {peer['ipv4'] for peer in peers} == {'10.240.42.5', '10.240.42.6'}
+assert {peer['ipv4'] for peer in peers} == {f'{sys.argv[2]}.5', f'{sys.argv[2]}.6'}
 assert all(set(peer) == {'name', 'ipv4', 'public_key'} for peer in peers)
 PY
     sudo wg set wg-vk peer "$runtime_only" remove
@@ -96,6 +97,22 @@ p = json.loads(base64.urlsafe_b64decode(encoded + '=' * (-len(encoded) % 4)))
 assert p['version'] == 1 and p['type'] == 'connection'
 assert p['settings']['peerAddress'] == '192.0.2.1:56004' and p['settings']['useSrtp'] is True
 PY
+    if [[ ${WG_TEST_QR:-0} == 1 ]]; then
+      client qr "$scratch/import.url" --output "$scratch/import.png" >/dev/null
+      test "$(sudo stat -c %a "$scratch/import.png")" = 600
+      sudo zbarimg --quiet --raw "$scratch/import.png" > "$scratch/decoded"
+      sudo python3 - "$scratch/import.url" "$scratch/decoded" <<'PY'
+from pathlib import Path
+import sys
+assert Path(sys.argv[1]).read_bytes().rstrip(b"\n") == Path(sys.argv[2]).read_bytes().rstrip(b"\n")
+PY
+      if client qr "$scratch/import.url" --output "$scratch/import.png" >/dev/null 2>&1; then
+        echo 'QR export overwrote an existing file' >&2
+        exit 1
+      fi
+      sudo rm "$scratch/import.png"
+      rm "$scratch/decoded"
+    fi
     sudo rm "$scratch/import.url"
     echo 'Concurrent allocations, duplicate handling, unmanaged reservations and protected exports passed.'
     ;;
