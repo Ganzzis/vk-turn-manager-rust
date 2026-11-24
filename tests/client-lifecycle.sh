@@ -56,6 +56,10 @@ WG
     sudo test ! -e /var/lib/vk-turn-clients/runtime-failure
     echo 'Partial runtime failure rolled back with the persistent config unchanged.'
 
+    wg genkey | wg pubkey > "$scratch/runtime-only.pub"
+    runtime_only=$(cat "$scratch/runtime-only.pub")
+    sudo wg set wg-vk peer "$runtime_only" allowed-ips 10.240.42.4/32
+
     client add ci-alpha > "$scratch/alpha.json" &
     alpha=$!
     client add ci-beta > "$scratch/beta.json" &
@@ -72,9 +76,10 @@ WG
 import json, sys
 with open(sys.argv[1]) as f: peers = json.load(f)
 assert {peer['name'] for peer in peers} == {'ci-alpha', 'ci-beta'}
-assert {peer['ipv4'] for peer in peers} == {'10.240.42.4', '10.240.42.5'}
+assert {peer['ipv4'] for peer in peers} == {'10.240.42.5', '10.240.42.6'}
 assert all(set(peer) == {'name', 'ipv4', 'public_key'} for peer in peers)
 PY
+    sudo wg set wg-vk peer "$runtime_only" remove
     client export ci-alpha --wg-endpoint 192.0.2.1:51820 --output "$scratch/client.conf" >/dev/null
     printf 'https://vk.ru/call/join/synthetic\n' > "$scratch/join"
     client export ci-alpha --srtp-endpoint 192.0.2.1:56004 --vk-link-file "$scratch/join" --output "$scratch/import.url" >/dev/null
@@ -99,6 +104,16 @@ PY
     cmp -s "$scratch/list.json" "$scratch/reboot.json"
     alpha=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["public_key"])' "$scratch/alpha.json")
     sudo wg show wg-vk peers | grep -Fxq "$alpha"
+    sudo mount --bind "$config" "$config"
+    trap 'sudo umount "$config"' EXIT
+    if client remove ci-alpha > "$scratch/error" 2>&1; then
+      echo 'Expected a revocation write failure' >&2
+      exit 1
+    fi
+    grep -q 'Device or resource busy' "$scratch/error"
+    sudo umount "$config"
+    trap - EXIT
+    client list | cmp -s - "$scratch/list.json"
     WG_CLIENT_CONF="$scratch/client.conf" bash network-dataplane.sh
     client remove ci-alpha >/dev/null
     if sudo wg show wg-vk peers | grep -Fxq "$alpha"; then

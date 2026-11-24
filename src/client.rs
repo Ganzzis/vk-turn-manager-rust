@@ -473,7 +473,11 @@ fn add(config: &Config, name: &str) -> Result<Value> {
 
 fn remove(config: &Config, name: &str) -> Result<Value> {
     let peer = config.peer(name)?;
-    let key_path = profile(name, false)?;
+    let key_path = match fs::symlink_metadata(PROFILES) {
+        Ok(_) => Some(profile(name, false)?),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => None,
+        Err(error) => return Err(error.into()),
+    };
     let runtime = runtime_peers()?;
     let present = runtime.iter().find(|(key, _)| key == &peer.public);
     if let Some((_, ips)) = present {
@@ -488,11 +492,15 @@ fn remove(config: &Config, name: &str) -> Result<Value> {
         return Err("Managed peer block was moved or edited; reconcile before revoking".into());
     }
     update(config, &replacement, peer, false, present.is_some())?;
-    match fs::remove_file(key_path) {
-        Ok(()) => File::open(PROFILES)?.sync_all()?,
-        Err(err) if err.kind() == io::ErrorKind::NotFound => {}
-        Err(err) => {
-            return Err(format!("Peer revoked but retained key could not be deleted: {err}").into())
+    if let Some(key_path) = key_path {
+        match fs::remove_file(key_path) {
+            Ok(()) => File::open(PROFILES)?.sync_all()?,
+            Err(err) if err.kind() == io::ErrorKind::NotFound => {}
+            Err(err) => {
+                return Err(
+                    format!("Peer revoked but retained key could not be deleted: {err}").into(),
+                );
+            }
         }
     }
     Ok(peer.json())
