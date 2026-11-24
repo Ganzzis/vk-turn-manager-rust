@@ -150,7 +150,7 @@ fn decode_link(uri: &str) -> Option<Profile> {
     }
     let url = url::Url::parse(uri.trim()).ok()?;
     if url.scheme() != "vkturnproxy"
-        || url.host_str() != Some("import")
+        || !matches!(url.host_str(), None | Some("import"))
         || !matches!(url.path(), "" | "/")
         || url.fragment().is_some()
         || !url.username().is_empty()
@@ -159,7 +159,10 @@ fn decode_link(uri: &str) -> Option<Profile> {
     {
         return None;
     }
-    let mut query = url.query_pairs();
+    // URLComponents, used by upstream, preserves literal '+' in standard
+    // base64. Do the same before percent-decoding the query field.
+    let raw_query = url.query()?.replace('+', "%2B");
+    let mut query = url::form_urlencoded::parse(raw_query.as_bytes());
     let (field, data) = query.next()?;
     if field != "data" || query.next().is_some() {
         return None;
@@ -365,6 +368,9 @@ mod tests {
         assert!(Tunnel::new(&imported).is_none());
         assert!(decode_link(&format!("{uri}&data={payload}")).is_none());
         assert!(decode_link(&uri.replace("import", "other")).is_none());
+        assert!(decode_link(&format!("vkturnproxy:?data={payload}")).is_some());
+        let standard = general_purpose::STANDARD.encode(fixture.to_string());
+        assert!(decode_link(&format!("vkturnproxy://import?data={standard}")).is_some());
     }
 
     #[test]

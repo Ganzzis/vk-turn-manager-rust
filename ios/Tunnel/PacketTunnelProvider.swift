@@ -62,6 +62,7 @@ final class Session {
     private let startupDeadline = DispatchTime.now() + .seconds(20)
     private var applying = false
     private var running = false
+    private var receiving = false
     private var outbound = 0
     private var inbound = 0
     private var pendingSends = 0
@@ -161,8 +162,11 @@ final class Session {
     }
 
     private func receive() {
+        guard !receiving else { return }
+        receiving = true
         connection.receiveMessage { [weak self] data, _, _, error in
             guard let self, self.core != nil else { return }
+            self.receiving = false
             if error != nil {
                 self.fail(.socket)
                 return
