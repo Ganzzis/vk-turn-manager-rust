@@ -1,0 +1,66 @@
+name: Deploy manager CLI to test VPS
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirmation:
+        description: 'Enter DEPLOY TEST MANAGER to replace the CLI on the test VPS.'
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: vk-turn-vps-test
+  cancel-in-progress: false
+
+jobs:
+  build:
+    if: github.ref == 'refs/heads/main' && inputs.confirmation == 'DEPLOY TEST MANAGER'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    outputs:
+      sha256: ${{ steps.package.outputs.sha256 }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - run: cargo fmt --all -- --check
+      - run: cargo test --locked
+      - run: bash tests/deploy-manager.sh
+      - name: Build Linux x86-64 release
+        id: package
+        run: |
+          cargo build --locked --release
+          digest=$(sha256sum target/release/vk-turn-manager)
+          echo "sha256=${digest%% *}" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: manager-deploy
+          path: target/release/vk-turn-manager
+          if-no-files-found: error
+          retention-days: 1
+
+  deploy:
+    if: github.ref == 'refs/heads/main' && inputs.confirmation == 'DEPLOY TEST MANAGER'
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    environment: vps-test
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
+        with:
+          name: manager-deploy
+          path: payload
+      - name: Deploy and verify the manager CLI
+        env:
+          VPS_HOST: ${{ secrets.VPS_HOST }}
+          VPS_USER: ${{ secrets.VPS_USER }}
+          VPS_SSH_KEY: ${{ secrets.VPS_SSH_KEY }}
+          VPS_KNOWN_HOSTS: ${{ secrets.VPS_KNOWN_HOSTS }}
+          MANAGER_SHA256: ${{ needs.build.outputs.sha256 }}
+        run: bash scripts/deploy-manager-ssh.sh payload/vk-turn-manager
