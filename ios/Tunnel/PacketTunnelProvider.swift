@@ -80,8 +80,7 @@ final class Session {
     }
 
     init(profile: Profile, provider: PacketTunnelProvider, queue: DispatchQueue, completion: @escaping (Error?) -> Void) throws {
-        if profile.transport == .srtp && profile.relay == nil { throw MobileError.unavailableTransport }
-        let json = try profile.coreJSON()
+        let json = try profile.connectionJSON()
         guard let colon = profile.endpoint.lastIndex(of: ":"),
               let number = UInt16(profile.endpoint[profile.endpoint.index(after: colon)...]),
               let port = NWEndpoint.Port(rawValue: number) else { throw MobileError.invalidProfile }

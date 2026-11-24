@@ -88,6 +88,8 @@ struct ConnectionsView: View {
                         SecureField("vkturnproxy:// link", text: $importText)
                             .textInputAutocapitalization(.never)
                             .autocorrectionDisabled()
+                        Text(MobileError.unavailableTransport.localizedDescription)
+                            .font(.footnote).foregroundStyle(.secondary)
                     }
                     .navigationTitle("Import link")
                     .toolbar {
@@ -172,7 +174,7 @@ private struct ProfileEditor: View {
                             Text("Without a certificate pin, the outer DTLS peer is unverified. WireGuard still verifies its peer.")
                                 .font(.footnote).foregroundStyle(.secondary)
                         } else {
-                            Text("Complete authorization with a supported VK client, then provide temporary TURN credentials.")
+                            Text(MobileError.unavailableTransport.localizedDescription)
                                 .font(.footnote).foregroundStyle(.secondary)
                         }
                     }

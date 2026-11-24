@@ -31,10 +31,18 @@ final class ProfileTests: XCTestCase {
         XCTAssertEqual(imported.endpoint, "srtp.example:56004")
         XCTAssertEqual(imported.allowedIPs, "198.51.100.0/24")
         XCTAssertThrowsError(try Profile.importLink("vkturnproxy://import?data=broken"))
+        XCTAssertThrowsError(try imported.connectionJSON()) { error in
+            XCTAssertEqual(error as? MobileError, .unavailableTransport)
+        }
         XCTAssertNil(try imported.coreJSON().withCString { vkt_tunnel_new($0) })
         imported.relay = RelayCredentials(address: "turn.example:3478", username: "fixture",
                                           password: "synthetic-token", expiresAt: "0")
         let envelope = try imported.coreJSON()
+        XCTAssertThrowsError(try imported.connectionJSON()) { error in
+            XCTAssertEqual(error as? MobileError, .relayCredentials)
+        }
+        imported.relay?.expiresAt = String(Int(Date().timeIntervalSince1970) + 120)
+        XCTAssertNoThrow(try imported.connectionJSON())
         XCTAssertNotNil(envelope.withCString { vkt_tunnel_new($0) }.map { handle in
             vkt_tunnel_free(handle)
             return true

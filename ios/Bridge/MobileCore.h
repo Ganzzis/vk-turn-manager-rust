@@ -4,6 +4,9 @@
 #include <stdint.h>
 
 int32_t vkt_validate(const char *profile);
+/* Configuration only: 1 usable, 0 invalid, -1 missing TURN credentials,
+ * -2 credentials outside the permitted validity window. */
+int32_t vkt_connection_preflight(const char *profile);
 char *vkt_import(const char *uri);
 void vkt_string_free(char *value);
 void *vkt_tunnel_new(const char *profile);

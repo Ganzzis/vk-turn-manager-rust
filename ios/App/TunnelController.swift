@@ -58,8 +58,7 @@ final class TunnelController: ObservableObject {
 
     func connect(_ id: UUID, profile: Profile) async throws {
         guard !busy else { throw MobileError.busy }
-        guard profile.transport == .direct || profile.relay != nil else { throw MobileError.unavailableTransport }
-        _ = try profile.coreJSON()
+        _ = try profile.connectionJSON()
         starting = true
         diagnostic = ""
         defer { starting = false; refresh() }

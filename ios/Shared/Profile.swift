@@ -35,6 +35,16 @@ struct Profile: Codable {
         return json
     }
 
+    func connectionJSON() throws -> String {
+        let json = try coreJSON()
+        switch json.withCString({ vkt_connection_preflight($0) }) {
+        case 1: return json
+        case -1: throw MobileError.unavailableTransport
+        case -2: throw MobileError.relayCredentials
+        default: throw MobileError.invalidProfile
+        }
+    }
+
     static func importLink(_ url: String) throws -> Profile {
         guard !url.utf8.contains(0),
               let value = url.withCString({ vkt_import($0) }) else { throw MobileError.invalidLink }
@@ -71,8 +81,8 @@ enum MobileError: Int, LocalizedError, CustomNSError {
         case .invalidProfile: return "Check the keys, IPv4 fields, and endpoint."
         case .invalidLink: return "This VK TURN connection link is invalid or uses an unsupported mode."
         case .secureStorage: return "Secure profile storage is unavailable. Check the signing and Keychain group."
-        case .unavailableTransport: return "Complete VK authorization with a supported client and enter temporary TURN credentials."
-        case .relayCredentials: return "Temporary TURN credentials are missing or expired."
+        case .unavailableTransport: return "Automatic TURN setup is unavailable for VK call links in this app. Use the original VK TURN Proxy, or enter credentials from an authorized TURN provider."
+        case .relayCredentials: return "The TURN credentials are missing or expire outside the allowed window (more than 30 seconds and up to 24 hours). Update them in the profile."
         case .turnAllocation: return "The TURN relay could not allocate a connection."
         case .dtlsHandshake: return "DTLS-SRTP negotiation or certificate verification failed."
         case .invalidConfiguration: return "The tunnel configuration is unavailable."
