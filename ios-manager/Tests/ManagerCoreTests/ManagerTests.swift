@@ -133,7 +133,7 @@ final class ManagerTests: XCTestCase {
             XCTFail("Root authenticated with an incorrect password")
         } catch ManagerError.authentication {}
         let bundle = ServerBundle(directory: URL(fileURLWithPath: try XCTUnwrap(env["VK_MANAGER_FIXTURE_BUNDLE"])))
-        try await passwordManager.install(bundle) { phase in print(phase) }
+        try await rootManager.install(bundle) { phase in print(phase) }
         let active = try await passwordManager.status()
         XCTAssertEqual(active.srtp, "active")
         XCTAssertEqual(active.wireguard, "active")
@@ -160,7 +160,21 @@ final class ManagerTests: XCTestCase {
         XCTAssertEqual(distroPath.version, "vk-turn-manager 0.3.0")
         let distroPeers = try await rootManager.peers()
         XCTAssertTrue(distroPeers.isEmpty)
-        _ = try await rootSSH.command("mv /usr/bin/vk-turn-manager /usr/local/bin/vk-turn-manager", privileged: true)
+        _ = try await rootSSH.command("""
+        set -e
+        mv /usr/bin/vk-turn-manager /root/vk-turn-manager-fixture
+        cat >/usr/bin/vk-turn-manager <<'LEGACY'
+        #!/bin/bash
+        if [[ $1 == --version ]]; then printf '%s\\n' 'unsupported version flag' >&2; exit 2; fi
+        exec /root/vk-turn-manager-fixture "$@"
+        LEGACY
+        chmod 0755 /usr/bin/vk-turn-manager
+        """, privileged: true)
+        let legacyVersion = try await rootManager.status()
+        XCTAssertEqual(legacyVersion.version, "unknown")
+        let legacyPeers = try await rootManager.peers()
+        XCTAssertTrue(legacyPeers.isEmpty)
+        _ = try await rootSSH.command("rm /usr/bin/vk-turn-manager && mv /root/vk-turn-manager-fixture /usr/local/bin/vk-turn-manager", privileged: true)
         let diagnosticText = rootLog.text()
         XCTAssertTrue(diagnosticText.contains("Авторизация SSH успешна"))
         XCTAssertTrue(diagnosticText.contains("команда отклонила аргумент"))
