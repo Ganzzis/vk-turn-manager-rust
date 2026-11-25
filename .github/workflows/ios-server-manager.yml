@@ -1,0 +1,174 @@
+name: iOS Server Manager
+
+on:
+  pull_request:
+    paths: ['ios-manager/**', 'src/**', 'units/**', 'Cargo.*', 'install.sh', 'scripts/package-server-release.sh', 'tests/ubuntu-reboot.sh', 'tests/network-dataplane.sh', '.github/workflows/ios-server-manager.yml']
+  push:
+    branches: [main]
+    paths: ['ios-manager/**', 'src/**', 'units/**', 'Cargo.*', 'install.sh', 'scripts/package-server-release.sh', 'tests/ubuntu-reboot.sh', 'tests/network-dataplane.sh', '.github/workflows/ios-server-manager.yml']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  server-assets:
+    strategy:
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+            sha256: 21b4c5e02c8b6658521d17ecbbc2f25487b2cd9f863a7ff70a0a66783af63e98
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+            sha256: b06bf4c9f40dfd882d85234b85d26773d9503e00d58661fd3bb15d311678ec12
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v6
+      - run: rustup toolchain install 1.100.0 --profile minimal
+      - name: Build the manager and verify upstream SRTP
+        env:
+          ARCH: ${{ matrix.arch }}
+          TARGET: ${{ matrix.target }}
+          EXPECTED: ${{ matrix.sha256 }}
+        run: |
+          set -euo pipefail
+          bash scripts/package-server-release.sh "$TARGET" bundle
+          cp install.sh bundle/
+          asset="server-linux-$ARCH"
+          curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' \
+            --max-time 120 -o "bundle/$asset" "https://github.com/anton48/vk-turn-proxy/releases/download/srtp-build478/$asset"
+          printf '%s  %s\n' "$EXPECTED" "bundle/$asset" | sha256sum -c -
+          gzip -t bundle/*.tar.gz
+      - uses: actions/upload-artifact@v6
+        with:
+          name: server-manager-assets-${{ matrix.arch }}
+          path: bundle/
+          if-no-files-found: error
+
+  test-ssh:
+    needs: server-assets
+    strategy:
+      fail-fast: false
+      matrix:
+        ubuntu: ['24.04', '26.04']
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/download-artifact@v7
+        with:
+          name: server-manager-assets-amd64
+          path: bundle
+      - name: Prepare disposable Ubuntu and verify end-to-end SSH workflow
+        env:
+          UBUNTU_VERSION: ${{ matrix.ubuntu }}
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends qemu-system-x86 qemu-utils cloud-image-utils ovmf
+          swift --version
+          swift test --package-path ios-manager --skip testDisposableUbuntuOverSSH
+          (cd bundle && sha256sum install.sh server-linux-amd64 *.tar.gz > SHA256SUMS)
+          cargo build --release --locked
+          VK_MANAGER_FIXTURE_BUNDLE="$PWD/bundle" bash tests/ubuntu-reboot.sh target/release/vk-turn-manager "$UBUNTU_VERSION"
+
+  ipa:
+    needs: server-assets
+    runs-on: macos-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/download-artifact@v7
+        with:
+          pattern: server-manager-assets-*
+          path: ios-manager/ServerBundle
+          merge-multiple: true
+      - name: Verify both packages and prepare app resources
+        working-directory: ios-manager
+        run: |
+          set -euo pipefail
+          cd ServerBundle
+          test -f vk-turn-manager-v0.3.0-linux-amd64.tar.gz
+          test -f vk-turn-manager-v0.3.0-linux-arm64.tar.gz
+          test -f server-linux-amd64
+          test -f server-linux-arm64
+          shasum -a 256 install.sh server-linux-* *.tar.gz > SHA256SUMS
+      - name: Resolve SSH dependencies and test
+        working-directory: ios-manager
+        run: |
+          swift test --skip testDisposableUbuntuOverSSH
+          cp ../LICENSE ServerBundle/Manager-LICENSE.txt
+          curl -fsSL --proto '=https' --proto-redir '=https' \
+            https://raw.githubusercontent.com/anton48/vk-turn-proxy/f954cb04ac17f49059f6fe5630a09428ff04c242/LICENSE \
+            -o ServerBundle/SRTP-LICENSE.txt
+          printf '%s\n' 'Corresponding source: https://github.com/anton48/vk-turn-proxy/tree/f954cb04ac17f49059f6fe5630a09428ff04c242' > ServerBundle/SRTP-SOURCE.txt
+          python3 - <<'PY'
+          from pathlib import Path
+          import shutil
+          for checkout in Path(".build/checkouts").iterdir():
+              for path in checkout.rglob("*"):
+                  if path.is_file() and not path.is_symlink() and path.name.upper().startswith(("LICENSE", "NOTICE", "COPYING")):
+                      if ".git" in path.relative_to(checkout).parts:
+                          continue
+                      destination = Path("ServerBundle/Licenses") / checkout.name / path.relative_to(checkout)
+                      destination.parent.mkdir(parents=True, exist_ok=True)
+                      shutil.copyfile(path, destination)
+          PY
+      - name: Generate and compile iPhone app
+        working-directory: ios-manager
+        run: |
+          set -euo pipefail
+          if ! command -v xcodegen >/dev/null; then brew install xcodegen; fi
+          xcodebuild -version
+          xcrun --sdk iphoneos --show-sdk-version | grep -E '^26([.]|$)'
+          xcodegen generate
+          cp Package.resolved VKServerManager.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved 2>/dev/null || {
+            mkdir -p VKServerManager.xcodeproj/project.xcworkspace/xcshareddata/swiftpm
+            cp Package.resolved VKServerManager.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved
+          }
+          xcodebuild archive -project VKServerManager.xcodeproj -scheme VKServerManager \
+            -clonedSourcePackagesDirPath build/SourcePackages \
+            -destination 'generic/platform=iOS' -archivePath build/VKServerManager.xcarchive CODE_SIGNING_ALLOWED=NO
+      - name: Package unsigned IPA and Xcode archive
+        working-directory: ios-manager
+        run: |
+          set -euo pipefail
+          app=build/VKServerManager.xcarchive/Products/Applications/VKServerManager.app
+          test -f "$app/VKServerManager"
+          test ! -d "$app/PlugIns"
+          test -f "$app/ServerBundle/vk-turn-manager-v0.3.0-linux-amd64.tar.gz"
+          test -f "$app/ServerBundle/vk-turn-manager-v0.3.0-linux-arm64.tar.gz"
+          (cd "$app/ServerBundle" && shasum -a 256 -c SHA256SUMS)
+          mkdir -p build/ipa/Payload build/distribution
+          ditto "$app" build/ipa/Payload/VKServerManager.app
+          ditto -c -k --keepParent build/ipa/Payload build/distribution/VKServerManager-unsigned.ipa
+          ditto -c -k --keepParent build/VKServerManager.xcarchive build/distribution/VKServerManager-unsigned.xcarchive.zip
+          curl -fsSL --proto '=https' --proto-redir '=https' \
+            https://github.com/anton48/vk-turn-proxy/archive/f954cb04ac17f49059f6fe5630a09428ff04c242.tar.gz \
+            -o build/distribution/srtp-build478-source.tar.gz
+          cp README.md build/distribution/Signing.md
+          (cd build/distribution && shasum -a 256 *.ipa *.zip *.tar.gz > SHA256SUMS)
+      - uses: actions/upload-artifact@v6
+        with:
+          name: VKServerManager-iPhone
+          path: ios-manager/build/distribution/
+          if-no-files-found: error
+          retention-days: 30
+      - name: Test server profiles and Keychain on iOS Simulator
+        working-directory: ios-manager
+        run: |
+          set -euo pipefail
+          device=$(xcrun simctl list devices available --json | python3 -c '
+          import json, sys
+          devices = json.load(sys.stdin)["devices"]
+          print(next(device["udid"] for runtime, entries in devices.items()
+                     if ".iOS-26-" in runtime for device in entries if device["name"].startswith("iPhone")))
+          ')
+          xcodebuild test -project VKServerManager.xcodeproj -scheme VKServerManager \
+            -destination "platform=iOS Simulator,id=$device" -derivedDataPath build/simulator \
+            -clonedSourcePackagesDirPath build/SourcePackages \
+            -parallel-testing-enabled NO CODE_SIGNING_IDENTITY=-

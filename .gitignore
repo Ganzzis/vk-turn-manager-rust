@@ -7,3 +7,9 @@
 /ios/VKMobile.xcodeproj/
 /ios/App/Info.plist
 /ios/Tunnel/Info.plist
+
+/ios-manager/.build/
+/ios-manager/.swiftpm/
+/ios-manager/build/
+/ios-manager/ServerBundle/
+/ios-manager/VKServerManager.xcodeproj/
