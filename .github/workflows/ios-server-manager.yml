@@ -171,4 +171,35 @@ jobs:
           xcodebuild test -project VKServerManager.xcodeproj -scheme VKServerManager \
             -destination "platform=iOS Simulator,id=$device" -derivedDataPath build/simulator \
             -clonedSourcePackagesDirPath build/SourcePackages \
-            -parallel-testing-enabled NO CODE_SIGNING_IDENTITY=-
+            -parallel-testing-enabled NO -resultBundlePath build/SimulatorTests.xcresult CODE_SIGNING_IDENTITY=-
+      - name: Export simulator screenshots
+        working-directory: ios-manager
+        run: |
+          set -euo pipefail
+          xcrun xcresulttool export attachments --path build/SimulatorTests.xcresult --output-path build/attachments
+          python3 - <<'PYTHON'
+          import json
+          from pathlib import Path
+          import shutil
+
+          source = Path("build/attachments")
+          screenshots = Path("build/screenshots")
+          screenshots.mkdir()
+          manifest = json.loads((source / "manifest.json").read_text())
+          screens = {"empty", "servers", "dashboard", "clients", "settings", "settings-ssh", "export", "qr", "diagnostics"}
+          expected = {f"{theme}-{screen}" for theme in ("light", "dark") for screen in screens}
+          for test in manifest:
+              for attachment in test["attachments"]:
+                  suggested = attachment["suggestedHumanReadableName"]
+                  name = next((name for name in expected if suggested == name or suggested.startswith(name + ".") or suggested.startswith(name + "_")), None)
+                  if name:
+                      shutil.copyfile(source / attachment["exportedFileName"], screenshots / f"{name}.png")
+          actual = {path.stem for path in screenshots.glob("*.png")}
+          if expected != actual:
+              raise SystemExit(f"Missing screenshots: {sorted(expected - actual)}")
+          PYTHON
+      - uses: actions/upload-artifact@v6
+        with:
+          name: VKServerManager-iPhone-screenshots
+          path: ios-manager/build/screenshots/
+          if-no-files-found: error
