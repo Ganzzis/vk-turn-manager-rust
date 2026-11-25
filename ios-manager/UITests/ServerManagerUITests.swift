@@ -52,7 +52,9 @@ extension ServerManagerUITests {
                 case "servers":
                     XCTAssertTrue(app.descendants(matching: .any)["server-192.0.2.10"].firstMatch.waitForExistence(timeout: 8))
                 case "dashboard":
-                    XCTAssertTrue(app.staticTexts["Управление службами"].waitForExistence(timeout: 8))
+                    XCTAssertTrue(app.buttons["Запустить"].waitForExistence(timeout: 8))
+                    XCTAssertTrue(app.buttons["Остановить"].exists)
+                    XCTAssertTrue(app.buttons["Перезапуск"].exists)
                 case "clients":
                     reveal(app.buttons["Экспорт и QR-код"], in: app)
                 case "settings":
@@ -70,7 +72,7 @@ extension ServerManagerUITests {
                 }
                 attach(screen, theme: theme)
                 if screen == "settings" {
-                    reveal(app.staticTexts["Отпечаток SSH"], in: app)
+                    reveal(app.switches["Запросить повторную проверку ключа"], in: app)
                     attach("settings-ssh", theme: theme)
                 }
                 app.terminate()

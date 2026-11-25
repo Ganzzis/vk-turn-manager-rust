@@ -204,6 +204,7 @@ struct ServerEditor: View {
 
 struct ServerDetail: View {
     @EnvironmentObject private var vault: Vault
+    @Environment(\.dynamicTypeSize) private var typeSize
     let id: UUID
     #if DEBUG
     var sampleServer: Server? = nil
@@ -272,9 +273,10 @@ struct ServerDetail: View {
                 Section {
                     VStack(alignment: .leading, spacing: 12) {
                         PanelHeading(title: "Управление службами", symbol: "switch.2")
-                        ViewThatFits(in: .horizontal) {
-                            HStack { serviceControls }
-                            VStack(alignment: .leading, spacing: 8) { serviceControls }
+                        if typeSize.isAccessibilitySize {
+                            VStack(spacing: 8) { serviceControls }
+                        } else {
+                            HStack(spacing: 8) { serviceControls }
                         }
                     }.panel().dashboardRow()
                 }.disabled(job != nil)
@@ -334,7 +336,7 @@ struct ServerDetail: View {
                             confirm("Обновить сервер с сохранением клиентов?") { deploy(update: true) }
                         }
                         if usable {
-                            Button("Переустановить SRTP", systemImage: "arrow.trianglehead.clockwise") {
+                            Button("Переустановить SRTP", systemImage: "arrow.clockwise.circle") {
                                 confirm("Переустановить SRTP с сохранением клиентов?") { deploy(update: true) }
                             }
                             if status?.nat != "active" {
@@ -476,7 +478,7 @@ struct ServerDetail: View {
     private var currentOverview: some View {
         ServerOverview(
             name: server?.name ?? "Сервер",
-            address: server.map { "\($0.host):\($0.port)" } ?? "",
+            address: server.map { "\($0.host):\(String($0.port))" } ?? "",
             system: status?.system, architecture: status?.architecture,
             backend: managed ? status.map { managerVersion($0.version) } : nil,
             installation: status.map { installation($0.installation) },
@@ -496,17 +498,14 @@ struct ServerDetail: View {
 
     private var serviceControls: some View {
         Group {
-            Button("Запустить", systemImage: "play.fill") { change(.start) }
-                .secondaryControl()
-            Button("Остановить", systemImage: "stop.fill") {
+            ServiceControl(title: "Запустить", symbol: "play.fill") { change(.start) }
+            ServiceControl(title: "Остановить", symbol: "stop.fill") {
                 confirm("Остановить VPN-службы?") { change(.stop) }
-            }.secondaryControl()
-            Button("Перезапустить", systemImage: "arrow.clockwise") {
+            }
+            ServiceControl(title: "Перезапуск", symbol: "arrow.clockwise") {
                 confirm("Перезапустить VPN-службы?") { change(.restart) }
-            }.secondaryControl()
+            }
         }
-        .controlSize(.small)
-        .fixedSize(horizontal: true, vertical: false)
     }
 
     private var unlistedConnections: [Connection] {

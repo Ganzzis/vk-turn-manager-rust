@@ -89,7 +89,7 @@ struct ServiceBadge: View {
     private var appearance: (String, String, Color) {
         switch value {
         case "active": return ("Работает", "checkmark.circle.fill", .green)
-        case "inactive": return ("Остановлен", "stop.circle.fill", .red)
+        case "inactive": return ("Стоп", "stop.circle.fill", .red)
         case "failed": return ("Ошибка", "exclamationmark.circle.fill", .red)
         default: return ("Неизвестно", "minus.circle.fill", .secondary)
         }
@@ -119,7 +119,7 @@ struct ServerRow: View {
             SymbolTile(symbol: "server.rack")
             VStack(alignment: .leading, spacing: 5) {
                 Text(server.name).font(.headline)
-                Text("\(server.host):\(server.port)")
+                Text("\(server.host):\(String(server.port))")
                     .font(.subheadline.monospaced()).foregroundStyle(.secondary)
                 Label("Статус не проверен", systemImage: "minus.circle")
                     .font(.caption).foregroundStyle(.secondary)
@@ -201,5 +201,29 @@ struct ClientCard: View {
             }
         }
         .accessibilityElement(children: .combine)
+    }
+}
+
+struct ServiceControl: View {
+    let title: String
+    let symbol: String
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            VStack(spacing: 6) {
+                Image(systemName: symbol).font(.body.weight(.semibold))
+                Text(title).font(.caption.weight(.semibold))
+            }
+            .foregroundStyle(Interface.accent)
+            .multilineTextAlignment(.center)
+            .frame(maxWidth: .infinity, minHeight: 44)
+            .padding(.vertical, 4)
+            .fixedSize(horizontal: false, vertical: true)
+            .background(Interface.background, in: RoundedRectangle(cornerRadius: 11))
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(title)
     }
 }
