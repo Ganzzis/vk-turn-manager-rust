@@ -43,7 +43,8 @@ extension ServerManagerUITests {
         for theme in ["Light", "Dark"] {
             for screen in ["empty", "servers", "dashboard", "clients", "settings", "export", "qr", "diagnostics"] {
                 let app = XCUIApplication()
-                app.launchArguments = ["--capture-ui", screen, "-AppleInterfaceStyle", theme]
+                app.launchArguments = ["--capture-ui", screen]
+                if theme == "Dark" { app.launchArguments.append("--dark-screenshot") }
                 app.launch()
                 switch screen {
                 case "empty":

@@ -11,6 +11,7 @@ struct ServerManagerApp: App {
                 #if DEBUG
                 if let screen = ScreenshotScreen.requested {
                     screen.environmentObject(vault).tint(Interface.accent)
+                        .preferredColorScheme(ScreenshotScreen.colorScheme)
                 } else {
                     ServerList().environmentObject(vault).tint(Interface.accent)
                 }
@@ -688,6 +689,7 @@ struct ExportSheet: View {
 
 struct ImportCard: View {
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     let link: String
     @State private var copied = false
 
@@ -706,7 +708,7 @@ struct ImportCard: View {
                         UIPasteboard.general.setItems([["public.utf8-plain-text": link]], options: [
                             .localOnly: true, .expirationDate: Date().addingTimeInterval(120)
                         ])
-                        withAnimation(.easeInOut(duration: 0.2)) { copied = true }
+                        withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.2)) { copied = true }
                     }.primaryControl()
                     ShareLink(item: link) { Label("Поделиться ссылкой", systemImage: "square.and.arrow.up") }
                         .secondaryControl()

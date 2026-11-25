@@ -11,6 +11,10 @@ enum ScreenshotScreen: String, View {
         return Self(rawValue: arguments[i + 1])
     }
 
+    static var colorScheme: ColorScheme {
+        ProcessInfo.processInfo.arguments.contains("--dark-screenshot") ? .dark : .light
+    }
+
     private static var sample: Server {
         var server = Server()
         server.name = "Хельсинки"

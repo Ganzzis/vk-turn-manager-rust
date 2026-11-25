@@ -131,6 +131,7 @@ struct ServerRow: View {
 }
 
 struct ServerOverview: View {
+    @Environment(\.dynamicTypeSize) private var typeSize
     let name: String
     let address: String
     let system: String?
@@ -157,9 +158,10 @@ struct ServerOverview: View {
             if let installation { Text(installation).font(.subheadline) }
             if let backend { Text("Backend \(backend)").font(.subheadline) }
             Text(freshness).font(.caption).foregroundStyle(.secondary)
-            ViewThatFits(in: .horizontal) {
-                HStack(alignment: .top, spacing: 6) { badges }
+            if typeSize >= .xxxLarge {
                 VStack(spacing: 6) { badges }
+            } else {
+                HStack(alignment: .top, spacing: 6) { badges }
             }
         }
     }
