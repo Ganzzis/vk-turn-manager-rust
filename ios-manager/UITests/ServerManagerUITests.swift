@@ -21,7 +21,7 @@ final class ServerManagerUITests: XCTestCase {
             hostField.tap()
             hostField.typeText(host)
             let password = app.secureTextFields["Пароль SSH"]
-            if !password.isHittable { app.swipeUp() }
+            reveal(password, in: app)
             password.tap()
             password.typeText("synthetic-password")
             app.buttons["Сохранить"].tap()
@@ -34,5 +34,64 @@ final class ServerManagerUITests: XCTestCase {
         }
         XCTAssertTrue(row("192.0.2.10").waitForExistence(timeout: 8))
         XCTAssertTrue(row("192.0.2.11").exists)
+    }
+}
+
+extension ServerManagerUITests {
+    func testCaptureMainScreens() {
+        continueAfterFailure = false
+        for theme in ["Light", "Dark"] {
+            for screen in ["empty", "servers", "dashboard", "clients", "settings", "export", "qr", "diagnostics"] {
+                let app = XCUIApplication()
+                app.launchArguments = ["--capture-ui", screen]
+                if theme == "Dark" { app.launchArguments.append("--dark-screenshot") }
+                app.launch()
+                switch screen {
+                case "empty":
+                    XCTAssertTrue(app.buttons["Добавить первый VPS"].waitForExistence(timeout: 8))
+                case "servers":
+                    XCTAssertTrue(app.descendants(matching: .any)["server-192.0.2.10"].firstMatch.waitForExistence(timeout: 8))
+                case "dashboard":
+                    XCTAssertTrue(app.buttons["Запустить"].waitForExistence(timeout: 8))
+                    XCTAssertTrue(app.buttons["Остановить"].exists)
+                    XCTAssertTrue(app.buttons["Перезапуск"].exists)
+                case "clients":
+                    reveal(app.buttons["Экспорт и QR-код"], in: app)
+                case "settings":
+                    XCTAssertTrue(app.textFields["IP-адрес или DNS-имя"].waitForExistence(timeout: 8))
+                case "export":
+                    XCTAssertTrue(app.secureTextFields["Приглашение VK Calls"].waitForExistence(timeout: 8))
+                case "qr":
+                    XCTAssertTrue(app.images["QR-код для импорта VPN-профиля"].waitForExistence(timeout: 8))
+                case "diagnostics":
+                    let diagnostics = app.buttons["Диагностика SSH"]
+                    reveal(diagnostics, in: app)
+                    diagnostics.tap()
+                    XCTAssertTrue(app.navigationBars["Диагностика SSH"].waitForExistence(timeout: 8))
+                default: XCTFail("Unexpected screen")
+                }
+                attach(screen, theme: theme)
+                if screen == "settings" {
+                    reveal(app.switches["Запросить повторную проверку ключа"], in: app)
+                    attach("settings-ssh", theme: theme)
+                }
+                app.terminate()
+            }
+        }
+    }
+
+    private func reveal(_ element: XCUIElement, in app: XCUIApplication) {
+        for _ in 0..<8 {
+            if element.isHittable { return }
+            app.swipeUp()
+        }
+        XCTAssertTrue(element.isHittable)
+    }
+
+    private func attach(_ screen: String, theme: String) {
+        let attachment = XCTAttachment(screenshot: XCUIScreen.main.screenshot())
+        attachment.name = "\(theme.lowercased())-\(screen)"
+        attachment.lifetime = .keepAlways
+        add(attachment)
     }
 }

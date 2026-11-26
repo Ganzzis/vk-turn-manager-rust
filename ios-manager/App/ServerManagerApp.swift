@@ -7,7 +7,18 @@ import ManagerCore
 struct ServerManagerApp: App {
     @StateObject private var vault = Vault()
     var body: some Scene {
-        WindowGroup { ServerList().environmentObject(vault) }
+        WindowGroup {
+                #if DEBUG
+                if let screen = ScreenshotScreen.requested {
+                    screen.environmentObject(vault).tint(Interface.accent)
+                        .preferredColorScheme(ScreenshotScreen.colorScheme)
+                } else {
+                    ServerList().environmentObject(vault).tint(Interface.accent)
+                }
+                #else
+                ServerList().environmentObject(vault).tint(Interface.accent)
+                #endif
+            }
     }
 }
 
@@ -16,23 +27,30 @@ private func message(_ error: Error) -> String {
     return "Операция не выполнена. Проверьте состояние сервера."
 }
 
-private struct ServerList: View {
+struct ServerList: View {
     @EnvironmentObject private var vault: Vault
+    #if DEBUG
+    var sampleServers: [Server]? = nil
+    #endif
     @State private var editor: Server?
     @State private var error = ""
+
+    private var visibleServers: [Server] {
+        #if DEBUG
+        if let sampleServers { return sampleServers }
+        #endif
+        return vault.servers
+    }
 
     var body: some View {
         NavigationStack {
             List {
-                ForEach(vault.servers) { server in
+                ForEach(visibleServers) { server in
                     NavigationLink(value: server.id) {
-                        Label {
-                            VStack(alignment: .leading) {
-                                Text(server.name)
-                                Text("\(server.host):\(server.port)").font(.subheadline).foregroundStyle(.secondary)
-                            }
-                        } icon: { Image(systemName: "server.rack").foregroundStyle(.tint) }
+                        ServerRow(server: server)
                     }
+                    .panel(inset: 12)
+                    .dashboardRow()
                     .accessibilityIdentifier("server-\(server.host)")
                     .swipeActions {
                         Button("Забыть VPS", role: .destructive) {
@@ -43,10 +61,20 @@ private struct ServerList: View {
                     }
                 }
             }
+            .listStyle(.plain)
+            .scrollContentBackground(.hidden)
+            .background(Interface.background)
             .overlay {
-                if vault.servers.isEmpty {
-                    ContentUnavailableView("Нет серверов", systemImage: "server.rack",
-                                           description: Text("Добавьте VPS, чтобы установить VK TURN Proxy или управлять сервером."))
+                if visibleServers.isEmpty {
+                    ContentUnavailableView {
+                        Label("Нет серверов", systemImage: "server.rack")
+                    } description: {
+                        Text("Добавьте VPS, чтобы установить VK TURN Proxy или управлять существующей установкой.")
+                    } actions: {
+                        Button("Добавить первый VPS", systemImage: "plus") { editor = Server() }
+                            .primaryControl()
+                            .disabled(vault.loadFailed)
+                    }
                 }
             }
             .navigationTitle("Серверы")
@@ -70,7 +98,7 @@ private struct ServerList: View {
     }
 }
 
-private struct ServerEditor: View {
+struct ServerEditor: View {
     @EnvironmentObject private var vault: Vault
     @Environment(\.dismiss) private var dismiss
     @State var server: Server
@@ -80,44 +108,67 @@ private struct ServerEditor: View {
 
     var body: some View {
         NavigationStack {
-            Form {
-                Section("VPS") {
-                    TextField("Название", text: $server.name)
-                    TextField("IP-адрес или DNS-имя", text: $server.host).keyboardType(.URL)
-                    TextField("SSH-порт", value: $server.port, format: .number.grouping(.never)).keyboardType(.numberPad)
-                    TextField("Логин", text: $server.user)
-                }
-                .textInputAutocapitalization(.never)
-                .autocorrectionDisabled()
-                Section("Доступ SSH") {
-                    Picker("Способ входа", selection: $credentials.method) {
-                        Text("Пароль").tag(Credentials.Method.password)
-                        Text("Ключ Ed25519").tag(Credentials.Method.key)
-                    }
-                    if credentials.method == .password {
-                        SecureField("Пароль SSH", text: $credentials.password)
-                    } else {
-                        Button("Вставить ключ OpenSSH") {
-                            if let key = UIPasteboard.general.string { credentials.privateKey = key }
+            ScrollView {
+                VStack(spacing: 14) {
+                    VStack(alignment: .leading, spacing: 13) {
+                        PanelHeading(title: "Сервер", symbol: "server.rack")
+                        FieldLabel(title: "Название") { TextField("Мой VPS", text: $server.name) }
+                        FieldLabel(title: "IP-адрес или DNS-имя") {
+                            TextField("server.example", text: $server.host).keyboardType(.URL)
                         }
-                        if !credentials.privateKey.isEmpty {
-                            Label("Ключ добавлен", systemImage: "key.fill")
+                        FieldLabel(title: "SSH-порт") {
+                            TextField("22", value: $server.port, format: .number.grouping(.never)).keyboardType(.numberPad)
                         }
-                        SecureField("Пароль ключа (если задан)", text: $credentials.passphrase)
+                        FieldLabel(title: "Логин") { TextField("root", text: $server.user) }
                     }
-                    if server.user != "root" {
-                        SecureField(credentials.method == .password ? "Другой пароль sudo (при необходимости)" : "Пароль sudo (если требуется)",
-                                    text: $credentials.sudoPassword)
+                    .textInputAutocapitalization(.never)
+                    .autocorrectionDisabled()
+                    .panel()
+
+                    VStack(alignment: .leading, spacing: 13) {
+                        PanelHeading(title: "Авторизация SSH", symbol: "lock.shield")
+                        Picker("Способ входа", selection: $credentials.method) {
+                            Text("Пароль").tag(Credentials.Method.password)
+                            Text("Ключ Ed25519").tag(Credentials.Method.key)
+                        }.pickerStyle(.segmented)
+                        if credentials.method == .password {
+                            FieldLabel(title: "Пароль SSH") {
+                                SecureField("Введите пароль", text: $credentials.password)
+                            }
+                        } else {
+                            Button("Вставить ключ OpenSSH", systemImage: "key") {
+                                if let key = UIPasteboard.general.string { credentials.privateKey = key }
+                            }.secondaryControl()
+                            if !credentials.privateKey.isEmpty {
+                                Label("Ключ добавлен", systemImage: "checkmark.circle")
+                            }
+                            FieldLabel(title: "Пароль ключа (если задан)") {
+                                SecureField("Пароль ключа", text: $credentials.passphrase)
+                            }
+                        }
+                        if server.user != "root" {
+                            FieldLabel(title: credentials.method == .password
+                                       ? "Другой пароль sudo (при необходимости)" : "Пароль sudo (если требуется)") {
+                                SecureField("Пароль sudo", text: $credentials.sudoPassword)
+                            }
+                        }
+                    }.panel()
+
+                    if let pin = server.hostKey {
+                        VStack(alignment: .leading, spacing: 12) {
+                            PanelHeading(title: "Отпечаток SSH", symbol: "checkmark.shield")
+                            Text(pin).font(.footnote.monospaced()).textSelection(.enabled)
+                            Toggle("Запросить повторную проверку ключа", isOn: $resetPin)
+                        }.panel()
                     }
-                }
-                if let pin = server.hostKey {
-                    Section("Отпечаток SSH") {
-                        Text(pin).font(.footnote.monospaced())
-                        Toggle("Запросить повторную проверку ключа", isOn: $resetPin)
+                    if !error.isEmpty {
+                        Label(error, systemImage: "exclamationmark.circle")
+                            .foregroundStyle(.red).panel().accessibilityIdentifier("save-error")
                     }
-                }
-                if !error.isEmpty { Text(error).foregroundStyle(.red).accessibilityIdentifier("save-error") }
+                }.padding(16)
             }
+            .background(Interface.background)
+            .scrollDismissesKeyboard(.interactively)
             .navigationTitle("Доступ к VPS")
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) { Button("Отмена") { dismiss() } }
@@ -151,10 +202,16 @@ private struct ServerEditor: View {
     }
 }
 
-private struct ServerDetail: View {
+struct ServerDetail: View {
     @EnvironmentObject private var vault: Vault
+    @Environment(\.dynamicTypeSize) private var typeSize
     let id: UUID
+    #if DEBUG
+    var sampleServer: Server? = nil
+    #endif
     @State private var status: ServerStatus?
+    @State private var statusCurrent = false
+    @State private var checkedAt: Date?
     @State private var peers: [Peer] = []
     @State private var connections: [Connection] = []
     @State private var job: Task<Void, Never>?
@@ -168,107 +225,151 @@ private struct ServerDetail: View {
     @State private var diagnosticSheet: Journal?
     @State private var editor: Server?
 
-    private var server: Server? { vault.servers.first { $0.id == id } }
-    private var managed: Bool { status?.installation == .managed }
+    private var server: Server? {
+        #if DEBUG
+        if let sampleServer { return sampleServer }
+        #endif
+        return vault.servers.first { $0.id == id }
+    }
+
+    private var isSample: Bool {
+        #if DEBUG
+        return sampleServer != nil
+        #else
+        return false
+        #endif
+    }
+
+    private var managed: Bool { isSample || status?.installation == .managed }
     private var usable: Bool { managed && status?.version != "-" }
+    private var canAddClient: Bool { isSample || status?.wireguard == "active" }
 
     var body: some View {
         List {
-            Section("Сервер") {
-                if let status {
-                    LabeledContent("Система", value: "\(status.system) · \(status.architecture)")
-                    LabeledContent("Установка", value: installation(status.installation))
-                    if status.installation == .managed {
-                        LabeledContent("Версия", value: managerVersion(status.version))
-                    }
-                    LabeledContent("WireGuard", value: service(status.wireguard))
-                    LabeledContent("DTLS-SRTP", value: service(status.srtp))
-                    LabeledContent("IPv4 NAT", value: service(status.nat))
-                } else { Text("Обновите состояние, чтобы проверить VPS.").foregroundStyle(.secondary) }
-                Button("Диагностика SSH", systemImage: "stethoscope") {
-                    diagnosticSheet = Journal(text: diagnostics.text())
-                }
+            Section {
+                overview.panel().dashboardRow()
                 if job != nil {
-                    ProgressView(progress)
-                    Button("Прервать", role: .cancel) { job?.cancel() }
+                    HStack {
+                        ProgressView(progress)
+                        Spacer()
+                        Button("Прервать", role: .cancel) { job?.cancel() }.secondaryControl()
+                    }.panel().dashboardRow()
                 } else {
                     Button("Обновить состояние", systemImage: "arrow.clockwise") { refresh() }
+                        .secondaryControl().dashboardRow()
                 }
             }
             if status?.installation == .absent {
                 Section {
-                    if #available(iOS 26.0, *) {
-                        installButton.buttonStyle(.glassProminent)
-                    } else {
-                        installButton.buttonStyle(.borderedProminent)
-                    }
-                } footer: { Text("Установит WireGuard, SRTP и IPv4 NAT. Входящий UDP 56004 должен быть разрешён в настройках VPS.") }
+                    VStack(alignment: .leading, spacing: 12) {
+                        PanelHeading(title: "Установка", symbol: "arrow.down.circle")
+                        Text("Установит WireGuard, SRTP и IPv4 NAT. Разрешите входящий UDP 56004.")
+                            .font(.subheadline).foregroundStyle(.secondary)
+                        installButton.primaryControl()
+                    }.panel().dashboardRow()
+                }
             }
             if managed {
-                Section("Управление") {
-                    Button("Запустить") { change(.start) }
-                    Button("Остановить") { confirm("Остановить VPN-службы?") { change(.stop) } }
-                    Button("Перезапустить") { confirm("Перезапустить VPN-службы?") { change(.restart) } }
-                    Button("Обновить встроенным пакетом") { confirm("Обновить сервер с сохранением клиентов?") { deploy(update: true) } }
-                    if usable {
-                        Button("Переустановить SRTP") { confirm("Переустановить SRTP с сохранением клиентов?") { deploy(update: true) } }
-                        if status?.nat != "active" {
-                            Button("Включить IPv4 NAT") { confirm("Включить NAT и IPv4 forwarding?") { change(.enableNAT) } }
+                Section {
+                    VStack(alignment: .leading, spacing: 12) {
+                        PanelHeading(title: "Управление службами", symbol: "switch.2")
+                        if typeSize.isAccessibilitySize {
+                            VStack(spacing: 8) { serviceControls }
+                        } else {
+                            HStack(spacing: 8) { serviceControls }
                         }
-                        Button("Удалить сервер", role: .destructive) {
-                            confirm("Удалить управляемые службы и рабочий конфиг?") { change(.remove) }
-                        }
-                    }
+                    }.panel().dashboardRow()
                 }.disabled(job != nil)
 
                 if usable {
-                    Section("Клиенты") {
-                        Button("Добавить клиента", systemImage: "person.badge.plus") {
-                            peerName = ""; dialog = .add
-                        }.disabled(status?.wireguard != "active")
+                    Section {
+                        VStack(alignment: .leading, spacing: 10) {
+                            PanelHeading(title: "Клиенты", symbol: "person.2")
+                            Button("Добавить клиента", systemImage: "person.badge.plus") {
+                                peerName = ""; dialog = .add
+                            }.primaryControl().disabled(!canAddClient)
+                            if peers.isEmpty && !isSample {
+                                Text("Клиентов пока нет.").font(.subheadline).foregroundStyle(.secondary)
+                            }
+                        }.panel().dashboardRow()
+                        #if DEBUG
+                        if isSample {
+                            sampleClient.panel().dashboardRow()
+                        }
+                        #endif
                         ForEach(peers) { peer in
-                            Button {
-                                profilePeer = peer
-                            } label: {
-                                VStack(alignment: .leading) {
-                                    Text(peer.name)
-                                    Text(peer.ipv4).font(.caption).foregroundStyle(.secondary)
-                                }
+                            VStack(alignment: .leading, spacing: 9) {
+                                clientCard(peer: peer, item: connections.first { $0.publicKey == peer.publicKey })
+                                Button("Экспорт и QR-код", systemImage: "qrcode") { profilePeer = peer }
+                                    .secondaryControl()
                             }
+                            .panel()
+                            .dashboardRow()
                             .swipeActions {
-                                Button("Удалить", role: .destructive) {
-                                    confirm("Отозвать доступ клиента \(peer.name)?") {
-                                        run("Удаление клиента") { manager in
-                                            try await manager.changePeer(peer.name, remove: true)
-                                            try await load(manager)
-                                        }
-                                    }
+                                Button("Удалить", role: .destructive) { removeClient(peer) }
+                            }
+                            .accessibilityAction(named: Text("Удалить клиента")) { removeClient(peer) }
+                        }
+                    }.disabled(job != nil)
+                }
+                Section {
+                    VStack(alignment: .leading, spacing: 10) {
+                        PanelHeading(title: "Подключения", symbol: "point.3.connected.trianglepath.dotted")
+                        if isSample {
+                            Text("Рукопожатия и трафик указаны в карточках клиентов.")
+                                .font(.subheadline).foregroundStyle(.secondary)
+                        } else if connections.isEmpty {
+                            Text("Нет данных о пирах.").font(.subheadline).foregroundStyle(.secondary)
+                        } else if unlistedConnections.isEmpty {
+                            Text("Рукопожатия и трафик указаны в карточках клиентов.")
+                                .font(.subheadline).foregroundStyle(.secondary)
+                        }
+                    }.panel().dashboardRow()
+                    ForEach(unlistedConnections) { item in
+                        clientCard(peer: nil, item: item).panel().dashboardRow()
+                    }
+                }
+                Section {
+                    VStack(alignment: .leading, spacing: 9) {
+                        PanelHeading(title: "Обслуживание", symbol: "wrench.and.screwdriver")
+                        Button("Обновить встроенным пакетом", systemImage: "arrow.down.circle") {
+                            confirm("Обновить сервер с сохранением клиентов?") { deploy(update: true) }
+                        }
+                        if usable {
+                            Button("Переустановить SRTP", systemImage: "arrow.clockwise.circle") {
+                                confirm("Переустановить SRTP с сохранением клиентов?") { deploy(update: true) }
+                            }
+                            if status?.nat != "active" {
+                                Button("Включить IPv4 NAT", systemImage: "network") {
+                                    confirm("Включить NAT и IPv4 forwarding?") { change(.enableNAT) }
                                 }
                             }
+                            Button(role: .destructive) {
+                                confirm("Удалить управляемые службы и рабочий конфиг?") { change(.remove) }
+                            } label: { Label("Удалить сервер", systemImage: "trash") }
                         }
-                    }.disabled(job != nil)
-                }
-                Section("Подключения") {
-                    if connections.isEmpty { Text("Нет данных о пирах.").foregroundStyle(.secondary) }
-                    ForEach(connections) { item in
-                        VStack(alignment: .leading, spacing: 5) {
-                            Text(peers.first(where: { $0.publicKey == item.publicKey })?.name ?? String(item.publicKey.prefix(16)))
-                                .font(.headline)
-                            if let endpoint = item.endpoint { Text(endpoint).font(.subheadline) }
-                            if let handshake = item.handshake {
-                                LabeledContent("Рукопожатие", value: handshake.formatted(date: .abbreviated, time: .standard))
-                            } else { Text("Рукопожатий пока нет.").foregroundStyle(.secondary) }
-                            Text("Принято \(bytes(item.received)) · Отправлено \(bytes(item.sent))")
-                                .font(.caption).foregroundStyle(.secondary)
-                        }
+                    }.buttonStyle(.borderless).panel().dashboardRow()
+                }.disabled(job != nil)
+            }
+            Section {
+                VStack(alignment: .leading, spacing: 9) {
+                    PanelHeading(title: "Диагностика", symbol: "waveform.path.ecg")
+                    Button("Диагностика SSH", systemImage: "stethoscope") {
+                        diagnosticSheet = Journal(text: diagnostics.text())
                     }
-                    Button("Последние записи журнала", systemImage: "doc.text") {
-                        run("Чтение журнала") { journal = Journal(text: try await $0.logs()) }
-                    }.disabled(job != nil)
-                }
+                    if managed {
+                        Button("Последние записи журнала", systemImage: "doc.text") {
+                            run("Чтение журнала") { journal = Journal(text: try await $0.logs()) }
+                        }.disabled(job != nil)
+                    }
+                }.buttonStyle(.borderless).panel().dashboardRow()
             }
         }
-        .navigationTitle(server?.name ?? "Сервер")
+        .listStyle(.plain)
+        .scrollContentBackground(.hidden)
+        .background(Interface.background)
+        .navigationTitle("Обзор VPS")
+        .navigationBarTitleDisplayMode(.inline)
         .toolbar {
             if let server {
                 ToolbarItem(placement: .primaryAction) {
@@ -276,7 +377,7 @@ private struct ServerDetail: View {
                 }
             }
         }
-        .task { if status == nil { refresh() } }
+        .task { if status == nil && !isSample { refresh() } }
         .refreshable { if job == nil { refresh(); await job?.value } }
         .onDisappear { job?.cancel() }
         .sheet(item: $editor, onDismiss: { status = nil; refresh() }) { ServerEditor(server: $0) }
@@ -347,6 +448,87 @@ private struct ServerDetail: View {
         }
     }
 
+    @ViewBuilder private var overview: some View {
+        #if DEBUG
+        if isSample {
+            ServerOverview(name: server?.name ?? "Сервер", address: "192.0.2.10:22",
+                           system: "Ubuntu 26.04", architecture: "amd64", backend: "0.3.0",
+                           installation: "Управляемая", wireguard: "active", srtp: "active",
+                           nat: "inactive", freshness: "Проверено: 25 ноября, 14:28")
+        } else {
+            currentOverview
+        }
+        #else
+        currentOverview
+        #endif
+    }
+
+    #if DEBUG
+    private var sampleClient: some View {
+        VStack(alignment: .leading, spacing: 9) {
+            ClientCard(name: "iphone", address: "10.20.0.2/32", endpoint: nil,
+                       handshake: "25 нояб., 14:22:18", traffic: "Принято 24 МБ · Отправлено 81 МБ")
+            Button("Экспорт и QR-код", systemImage: "qrcode") {
+                profilePeer = ScreenshotScreen.peer
+            }.secondaryControl()
+        }.accessibilityIdentifier("sample-client")
+    }
+    #endif
+
+    private var currentOverview: some View {
+        ServerOverview(
+            name: server?.name ?? "Сервер",
+            address: server.map { "\($0.host):\(String($0.port))" } ?? "",
+            system: status?.system, architecture: status?.architecture,
+            backend: managed ? status.map { managerVersion($0.version) } : nil,
+            installation: status.map { installation($0.installation) },
+            wireguard: job == nil && statusCurrent ? status?.wireguard : nil,
+            srtp: job == nil && statusCurrent ? status?.srtp : nil,
+            nat: job == nil && statusCurrent ? status?.nat : nil,
+            freshness: freshness
+        )
+    }
+
+    private var freshness: String {
+        if job != nil { return "Выполняется операция" }
+        guard let checkedAt, status != nil else { return "Статус не проверен. Обновите состояние VPS." }
+        let time = checkedAt.formatted(date: .abbreviated, time: .shortened)
+        return statusCurrent ? "Проверено: \(time)" : "Последняя проверка: \(time). Статус не подтверждён."
+    }
+
+    private var serviceControls: some View {
+        Group {
+            ServiceControl(title: "Запустить", symbol: "play.fill") { change(.start) }
+            ServiceControl(title: "Остановить", symbol: "stop.fill") {
+                confirm("Остановить VPN-службы?") { change(.stop) }
+            }
+            ServiceControl(title: "Перезапуск", symbol: "arrow.clockwise") {
+                confirm("Перезапустить VPN-службы?") { change(.restart) }
+            }
+        }
+    }
+
+    private var unlistedConnections: [Connection] {
+        connections.filter { item in !peers.contains { $0.publicKey == item.publicKey } }
+    }
+
+    private func clientCard(peer: Peer?, item: Connection?) -> some View {
+        let telemetry = statusCurrent && job == nil ? item : nil
+        return ClientCard(name: peer?.name ?? String(item?.publicKey.prefix(16) ?? ""),
+                   address: peer?.ipv4, endpoint: telemetry?.endpoint,
+                   handshake: telemetry?.handshake?.formatted(date: .abbreviated, time: .standard),
+                   traffic: telemetry.map { "Принято \(bytes($0.received)) · Отправлено \(bytes($0.sent))" })
+    }
+
+    private func removeClient(_ peer: Peer) {
+        confirm("Отозвать доступ клиента \(peer.name)?") {
+            run("Удаление клиента") { manager in
+                try await manager.changePeer(peer.name, remove: true)
+                try await load(manager)
+            }
+        }
+    }
+
     private func trust(_ key: HostKey) {
         guard var stored = server else { return }
         do {
@@ -363,7 +545,7 @@ private struct ServerDetail: View {
     }
 
     private func run(_ title: String, operation: @escaping @MainActor (Manager) async throws -> Void) {
-        guard job == nil, let server else { return }
+        guard job == nil, !isSample, let server else { return }
         progress = title
         job = Task { @MainActor in
             defer { job = nil }
@@ -371,12 +553,15 @@ private struct ServerDetail: View {
                 try await operation(Manager(server: server, credentials: vault.credentials(id), diagnostics: diagnostics))
                 diagnostics.markCompletion()
             } catch ManagerError.hostKeyRequired(let key) {
+                statusCurrent = false
                 dialog = .trust(key)
             } catch is CancellationError {
                 diagnostics.markCancellation()
                 progress = ""; status = nil
+                statusCurrent = false
             } catch {
                 diagnostics.markFailure(error)
+                statusCurrent = false
                 dialog = .failure(message(error))
             }
         }
@@ -385,6 +570,8 @@ private struct ServerDetail: View {
     private func load(_ manager: Manager) async throws {
         let latest = try await manager.status()
         status = latest
+        checkedAt = Date()
+        statusCurrent = true
         peers = []
         connections = []
         guard latest.installation == .managed, latest.version != "-" else { return }
@@ -428,13 +615,11 @@ private struct ServerDetail: View {
         switch version {
         case "-": return "CLI не найден"
         case "unknown": return "CLI найден, версия неизвестна"
-        default: return version
+        default: return version.replacingOccurrences(of: "vk-turn-manager ", with: "", options: .anchored)
         }
     }
 
-    private func service(_ value: String) -> String {
-        switch value { case "active": return "Работает"; case "inactive": return "Остановлена"; case "failed": return "Ошибка"; default: return value }
-    }
+
 }
 
 private enum ServerDialog {
@@ -463,7 +648,7 @@ private struct SharedLink: Identifiable {
     let value: String
 }
 
-private struct ExportSheet: View {
+struct ExportSheet: View {
     @Environment(\.dismiss) private var dismiss
     let peer: Peer
     @State var endpoint: String
@@ -472,14 +657,21 @@ private struct ExportSheet: View {
 
     var body: some View {
         NavigationStack {
-            Form {
-                Section("Клиент \(peer.name)") {
-                    TextField("Публичный SRTP-адрес и порт", text: $endpoint)
-                    SecureField("Приглашение VK Calls", text: $invite)
-                }.textInputAutocapitalization(.never).autocorrectionDisabled()
-                Text("Ссылка и QR-код содержат приватный ключ клиента. Передавайте их только получателю.")
-                    .foregroundStyle(.secondary)
-            }
+            ScrollView {
+                VStack(spacing: 14) {
+                    VStack(alignment: .leading, spacing: 13) {
+                        PanelHeading(title: "Клиент \(peer.name)", symbol: "person.crop.circle")
+                        FieldLabel(title: "Публичный SRTP-адрес и порт") {
+                            TextField("server.example:56004", text: $endpoint)
+                        }
+                        FieldLabel(title: "Приглашение VK Calls") {
+                            SecureField("Вставьте ссылку", text: $invite)
+                        }
+                    }.textInputAutocapitalization(.never).autocorrectionDisabled().panel()
+                    Label("Ссылка и QR-код содержат приватный ключ клиента. Передавайте их только получателю.",
+                          systemImage: "lock.shield").font(.subheadline).foregroundStyle(.secondary).panel()
+                }.padding(16)
+            }.background(Interface.background)
             .navigationTitle("Профиль VK TURN")
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) { Button("Отмена") { dismiss() } }
@@ -494,8 +686,9 @@ private struct ExportSheet: View {
     }
 }
 
-private struct ImportCard: View {
+struct ImportCard: View {
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     let link: String
     @State private var copied = false
 
@@ -514,12 +707,13 @@ private struct ImportCard: View {
                         UIPasteboard.general.setItems([["public.utf8-plain-text": link]], options: [
                             .localOnly: true, .expirationDate: Date().addingTimeInterval(120)
                         ])
-                        copied = true
-                    }.buttonStyle(.borderedProminent)
+                        withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.2)) { copied = true }
+                    }.primaryControl()
                     ShareLink(item: link) { Label("Поделиться ссылкой", systemImage: "square.and.arrow.up") }
-                        .buttonStyle(.bordered)
-                }.padding()
+                        .secondaryControl()
+                }.padding(18).panel().padding(16)
             }
+            .background(Interface.background)
             .navigationTitle("Ссылка импорта")
             .toolbar { Button("Готово") { dismiss() } }
         }
