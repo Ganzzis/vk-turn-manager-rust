@@ -1,0 +1,67 @@
+name: Publish iPhone Manager 1.1.0
+
+on:
+  push:
+    branches: [release/ios-v1.1.0-upload]
+
+permissions: {}
+
+concurrency: publish-ios-v1.1.0
+
+jobs:
+  publish:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      actions: read
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      RELEASE_ID: '458974670'
+      RELEASE_TAG: ios-v1.1.0
+      SOURCE_SHA: 45c489e77fe93338bc08f2bd6d936909db638a5f
+      IOS_RUN: '45756724328'
+      RUST_RUN: '45756724331'
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - name: Check main CI, original draft and artifact provenance
+        run: |
+          set -euo pipefail
+          for run in "$IOS_RUN" "$RUST_RUN"; do
+            gh api "repos/$GH_REPO/actions/runs/$run" |
+              jq -e --arg sha "$SOURCE_SHA" '
+                .head_sha == $sha and .head_branch == "main" and .conclusion == "success"'
+          done
+          gh api "repos/$GH_REPO/releases/$RELEASE_ID" |
+            jq -e --arg tag "$RELEASE_TAG" --arg sha "$SOURCE_SHA" '
+              .draft and .tag_name == $tag and .target_commitish == $sha'
+          gh run download "$IOS_RUN" --name VKServerManager-iPhone --dir distribution
+          (cd distribution && sha256sum -c SHA256SUMS)
+          cp release-assets/{Signing.md,Licenses.zip,Screenshots.zip,Preview.png,SHA256SUMS} distribution/
+          (cd distribution && sha256sum -c SHA256SUMS)
+      - name: Upload and verify assets before publishing the original draft
+        working-directory: distribution
+        run: |
+          set -euo pipefail
+          while read -r digest file; do
+            assets=$(gh api "repos/$GH_REPO/releases/$RELEASE_ID/assets")
+            if ! jq -e --arg file "$file" 'any(.[]; .name == $file)' <<< "$assets" >/dev/null; then
+              gh release upload "$RELEASE_TAG" "$file"
+            fi
+            gh api "repos/$GH_REPO/releases/$RELEASE_ID/assets" |
+              jq -e --arg file "$file" --arg hash "sha256:$digest" '
+                any(.[]; .name == $file and .digest == $hash and .state == "uploaded")'
+          done < SHA256SUMS
+          if ! gh api "repos/$GH_REPO/releases/$RELEASE_ID/assets" |
+              jq -e 'any(.[]; .name == "SHA256SUMS")' >/dev/null; then
+            gh release upload "$RELEASE_TAG" SHA256SUMS
+          fi
+          manifest="sha256:$(sha256sum SHA256SUMS | cut -d " " -f 1)"
+          gh api "repos/$GH_REPO/releases/$RELEASE_ID/assets" |
+            jq -e --arg hash "$manifest" '
+              length == 8 and any(.[]; .name == "SHA256SUMS" and .digest == $hash and .state == "uploaded")'
+          gh api --method PATCH "repos/$GH_REPO/releases/$RELEASE_ID"             -F draft=false -f make_latest=true |
+            jq -e --arg tag "$RELEASE_TAG" 'select(.draft == false and .tag_name == $tag) | .html_url'
